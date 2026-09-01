@@ -32,14 +32,20 @@ jobs:
       - name: Build
         run: ./build.sh
 
+      # Prepare files for GitHub Pages
+      - name: Prepare Pages
+        run: |
+          mkdir -p _site/build
+          cp embed.html _site/
+          cp -r build/* _site/build/
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./build
+          path: ./_site
 
       - name: Deploy
         uses: actions/deploy-pages@v4
-
