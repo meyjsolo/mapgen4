@@ -29,16 +29,17 @@ function setMeshGeometry(mesh: Mesh, P: Float32Array) {
  * Fill an indexed buffer with data from the map.
  */
 function setMapGeometry(map: Map, mountain_folds: number, I: Int32Array, P: Float32Array) {
-    let {mesh, flow_s, elevation_r, elevation_t, rainfall_r} = map;
+    let {mesh, flow_s, elevation_r, elevation_t, rainfall_r, country_r, country_t} = map;
     let {numSolidSides, numRegions, numTriangles, is_boundary_t} = mesh;
 
     if (I.length !== 3 * numSolidSides) { throw "wrong size"; }
-    if (P.length !== 2 * (numRegions + numTriangles)) { throw "wrong size"; }
+    if (P.length !== 3 * (numRegions + numTriangles)) { throw "wrong size"; }
 
     let p = 0;
     for (let r = 0; r < numRegions; r++) {
         P[p++] = elevation_r[r];
         P[p++] = rainfall_r[r];
+        P[p++] = country_r[r];
     }
     for (let t = 0; t < numTriangles; t++) {
         // The quadrilateral's folds can have a lower elevation to
@@ -51,6 +52,7 @@ function setMapGeometry(map: Map, mountain_folds: number, I: Int32Array, P: Floa
             r2 = mesh.r_begin_s(s0+1),
             r3 = mesh.r_begin_s(s0+2);
         P[p++] = 1/3 * (rainfall_r[r1] + rainfall_r[r2] + rainfall_r[r3]);
+        P[p++] = country_t[t];
     }
 
     let i = 0;
@@ -88,6 +90,50 @@ export function clamp(x: number, lo: number, hi: number): number {
     if (x < lo) { x = lo; }
     if (x > hi) { x = hi; }
     return x;
+}
+
+
+/**
+ * Fill a buffer with country border quads. For each side between two
+ * regions with different countries we emit a short thick line crossing
+ * the side: a quad from one triangle centroid to the other. Returns
+ * the number of border segments; each segment uses 6 vertices (2
+ * triangles) of 2 floats each, so P must hold at least 12 floats per
+ * segment.
+ *
+ * a_em is the map geometry array (see setMapGeometry) with country
+ * ids stored as the third float per region vertex.
+ */
+function setBorderGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array): number {
+    const {numSolidSides} = mesh;
+    const HALF_WIDTH = 3.0; // model units; ~0.3% of the map
+    let segments = 0;
+    for (let s = 0; s < numSolidSides; s++) {
+        let s2 = mesh.s_opposite_s(s);
+        if (s2 < 0) continue;
+        let r1 = mesh.r_begin_s(s),
+            r2 = mesh.r_begin_s(s2);
+        let c1 = a_em[3*r1 + 2], c2 = a_em[3*r2 + 2];
+        if (c1 < 0 || c2 < 0 || c1 === c2) continue;
+
+        let t1 = mesh.t_inner_s(s),
+            t2 = mesh.t_inner_s(s2);
+        let ax = mesh.x_of_t(t1), ay = mesh.y_of_t(t1),
+            bx = mesh.x_of_t(t2), by = mesh.y_of_t(t2);
+        let dx = bx-ax, dy = by-ay;
+        let len = Math.sqrt(dx*dx + dy*dy) || 1;
+        let nx = -dy/len * HALF_WIDTH, ny = dx/len * HALF_WIDTH;
+
+        let p = 12 * segments;
+        P[p++] = ax+nx; P[p++] = ay+ny; // A + normal
+        P[p++] = ax-nx; P[p++] = ay-ny; // A - normal
+        P[p++] = bx+nx; P[p++] = by+ny; // B + normal
+        P[p++] = ax-nx; P[p++] = ay-ny;
+        P[p++] = bx-nx; P[p++] = by-ny; // B - normal
+        P[p++] = bx+nx; P[p++] = by+ny;
+        segments++;
+    }
+    return segments;
 }
 
 /**
@@ -144,4 +190,4 @@ function setRiverGeometry(map: Map, spacing: number, riversParam: any, P: Float3
     return p / 12;
 };
 
-export default {setMeshGeometry, setMapGeometry, setRiverGeometry};
+export default {setMeshGeometry, setMapGeometry, setRiverGeometry, setBorderGeometry};

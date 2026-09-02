@@ -45,6 +45,7 @@ let handler = (event) => {
         let start_time = performance.now();
         
         if (run.biomes) {
+            map.assignCountries(constraints.country, constraints.size);
             map.assignElevation(param.elevation, constraints);
             map.assignRainfall(param.biomes);
         }

@@ -62,6 +62,8 @@ const initialParams = {
         ['outline_coast', 0, 0, 1],
         ['outline_water', 13.0, 0, 20], // things start going wrong when this is high
         ['biome_colors', 1, 0, 1],
+        ['country_strength', 0.5, 0, 1],
+        ['country_borders', 1.0, 0, 1],
     ],
 };
 
@@ -185,9 +187,10 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
 
     function updateUI() {
         let userHasPainted = Painting.userHasPainted();
+        let countryHasPainted = Painting.countryHasPainted();
         (document.querySelector("#slider-seed input") as HTMLInputElement).disabled = userHasPainted;
         (document.querySelector("#slider-island input") as HTMLInputElement).disabled = userHasPainted;
-        (document.querySelector("#button-reset") as HTMLInputElement).disabled = !userHasPainted;
+        (document.querySelector("#button-reset") as HTMLInputElement).disabled = !(userHasPainted || countryHasPainted);
     }
     
     function generate() {
@@ -200,6 +203,7 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
                 constraints: {
                     size: Painting.size,
                     constraints: Painting.constraints,
+                    country: Painting.country,
                 },
                 quad_elements_buffer: render.quad_elements.buffer,
                 a_quad_em_buffer: render.a_quad_em.buffer,

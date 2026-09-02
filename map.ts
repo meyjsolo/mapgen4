@@ -11,6 +11,7 @@ import {createNoise2D} from 'simplex-noise';
 import FlatQueue from 'flatqueue';
 import {makeRandFloat} from '@redblobgames/prng';
 import {clamp} from "./geometry.ts";
+import {NUM_COUNTRIES} from "./countries.ts";
 import type {Mesh} from "./types.d.ts";
 
 type PrecalculatedNoise = {
@@ -98,6 +99,8 @@ export default class Map {
     r_wind_order: Int32Array;
     wind_sort_r: Float32Array;
     mountain_distance_t: Float32Array;
+    country_t: Int8Array;
+    country_r: Int8Array;
 
     constructor (public mesh: Mesh, public t_peaks: number[], param: any) {
         this.spacing = param.spacing;
@@ -113,6 +116,41 @@ export default class Map {
         this.r_wind_order        = new Int32Array(mesh.numRegions);
         this.wind_sort_r         = new Float32Array(mesh.numRegions);
         this.mountain_distance_t = new Float32Array(mesh.numTriangles);
+        this.country_t           = new Int8Array(mesh.numTriangles);
+        this.country_r           = new Int8Array(mesh.numRegions);
+    }
+
+    /**
+     * Assign countries from the painted low-res constraint canvas.
+     * Each solid triangle samples the country grid at its centroid;
+     * each region takes the majority vote of the triangles around it.
+     */
+    assignCountries(countryGrid: Float32Array, size: number) {
+        let {mesh, country_t, country_r} = this;
+        let {numSolidTriangles} = mesh;
+        for (let t = 0; t < numSolidTriangles; t++) {
+            let x = mesh.x_of_t(t)/1000, y = mesh.y_of_t(t)/1000;
+            let xi = clamp((x * size) | 0, 0, size-1),
+                yi = clamp((y * size) | 0, 0, size-1);
+            country_t[t] = countryGrid[yi * size + xi];
+        }
+
+        let votes = new Int32Array(NUM_COUNTRIES);
+        const t_around_r: number[] = [];
+        for (let r = 0; r < mesh.numRegions; r++) {
+            country_r[r] = -1;
+            if (mesh.is_ghost_r(r)) continue;
+            votes.fill(0);
+            mesh.t_around_r(r, t_around_r);
+            let best = -1, bestCount = 0;
+            for (let t of t_around_r) {
+                let c = country_t[t];
+                if (c < 0 || c >= NUM_COUNTRIES) continue;
+                let count = ++votes[c];
+                if (count > bestCount) { bestCount = count; best = c; }
+            }
+            country_r[r] = best;
+        }
     }
 
     assignTriangleElevation(elevationParam: { noisy_coastlines: number; mountain_sharpness: number; hill_height: number; ocean_depth: number; },
