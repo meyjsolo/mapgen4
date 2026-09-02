@@ -9,6 +9,7 @@
 import {vec2, vec4, mat4} from 'gl-matrix';
 import colormap from "./colormap.ts";
 import Geometry from "./geometry.ts";
+import {NUM_COUNTRIES, countryPalette} from "./countries.ts";
 import type {Mesh} from "./types.d.ts";
 
 //////////////////////////////////////////////////////////////////////
@@ -329,15 +330,19 @@ const vert_drape = `
     uniform mat4 u_projection;
     in vec2 a_xy;
     in vec2 a_em;
+    in float a_country;
     out vec2 v_em, v_uv, v_xy;
     out float v_z;
+    out float v_country;
     void main() {
         v_em = a_em;
+        v_country = a_country;
         vec2 xy_clamped = clamp(a_xy, vec2(0, 0), vec2(1000, 1000));
         v_z = max(0.0, a_em.x); // oceans with e<0 still rendered at z=0
         if (xy_clamped != a_xy) { // boundary points
             v_z = -0.5;
             v_em = vec2(0.0, 0.0);
+            v_country = -1.0;
         }
         vec4 pos = vec4(u_projection * vec4(xy_clamped, v_z, 1));
         v_uv = a_xy / 1000.0;
@@ -351,14 +356,18 @@ const frag_drape = `
     uniform sampler2D u_elevation;
     uniform sampler2D u_water;
     uniform sampler2D u_depth;
+    uniform sampler2D u_border;
     uniform vec2 u_light_angle, u_inverse_texture_size;
     uniform float u_slope, u_flat,
                   u_ambient, u_overhead,
                   u_outline_strength, u_outline_coast, u_outline_water,
                   u_outline_depth, u_outline_threshold,
-                  u_biome_colors;
+                  u_biome_colors,
+                  u_country_strength, u_country_borders;
+    uniform vec3 u_countrypalette[8];
     in vec2 v_uv, v_xy, v_em;
     in float v_z;
+    in float v_country;
     out vec4 out_fragcolor;
 
     const vec3 neutral_land_biome = vec3(0.9, 0.8, 0.7);
@@ -425,6 +434,15 @@ const frag_drape = `
         );
         if (z <= 0.5 && max(depth1, depth2) > 1.0/256.0 && neighboring_river <= 0.2) { outline += u_outline_coast * 256.0 * (max(depth1, depth2) - 2.0*(z - 0.5)); }
 
+        // Tint land with the country color and draw dark national borders
+        if (v_em.x >= 0.0 && v_country >= 0.0) {
+            int slot = int(clamp(floor(v_country + 0.5), 0.0, 7.0));
+            vec3 country_color = u_countrypalette[slot];
+            biome_color = mix(biome_color, country_color, u_country_strength);
+        }
+        float border = texture(u_border, pos).a;
+        biome_color *= mix(1.0, 1.0 - 0.9 * border, u_country_borders);
+
         out_fragcolor = vec4(mix(biome_color, water_color.rgb, water_color.a) * light / outline, 1);
     }`;
 
@@ -447,6 +465,21 @@ const frag_final = `
          out_fragcolor = texture(u_texture, v_uv + u_offset);
     }`;
 
+const vert_border = `
+    precision highp float;
+    uniform mat4 u_projection;
+    in vec2 a_xy;
+    void main() {
+        gl_Position = u_projection * vec4(a_xy, 0, 1);
+    }`;
+
+const frag_border = `
+    precision mediump float;
+    out vec4 out_fragcolor;
+    void main() {
+        out_fragcolor = vec4(0, 0, 0, 1);
+    }`;
+
 //////////////////////////////////////////////////////////////////////
 // Mapgen4 renderer
 
@@ -454,7 +487,9 @@ const fbo_texture_size: number = 2048;
 
 export default class Renderer {
     numRiverTriangles: number = 0;
+    numBorderSegments: number = 0;
 
+    mesh: Mesh;
     topdown: mat4;
     projection: mat4;
     inverse_projection: mat4;
@@ -464,6 +499,16 @@ export default class Renderer {
     quad_elements_length: number; // have to store the original size because the worker thread borrows the actual array
     quad_elements: Int32Array;
     a_river_xyww: Float32Array;
+    a_border_xy: Float32Array;
+    countryPalette: Float32Array;
+
+    countryNames: string[];
+    countrySumX: Float32Array;
+    countrySumY: Float32Array;
+    countryCenterX: Float32Array;
+    countryCenterY: Float32Array;
+    labelLayer: HTMLDivElement;
+    countryLabels: {el: HTMLSpanElement; visible: boolean; x: number; y: number}[];
 
     screenshotCanvas: HTMLCanvasElement;
     screenshotCallback: () => void;
@@ -477,21 +522,25 @@ export default class Renderer {
     fbo_land: Framebuffer;
     fbo_depth: Framebuffer;
     fbo_drape: Framebuffer;
+    fbo_border: Framebuffer;
 
     program_river: Program;
     program_land: Program;
     program_depth: Program;
     program_drape: Program;
     program_final: Program;
+    program_border: Program;
 
     buffer_fullscreen: Buffer;
     buffer_quad_xy: Buffer;
     buffer_quad_em: Buffer;
     buffer_quad_elements: Buffer;
     buffer_river_xyww: Buffer;
+    buffer_border_xy: Buffer;
 
     constructor (mesh: Mesh) {
         const canvas = document.getElementById('mapgen4') as HTMLCanvasElement;
+        this.mesh = mesh;
         this.webgl = new WebGLWrapper(canvas);
 
         this.resizeCanvas();
@@ -504,7 +553,7 @@ export default class Renderer {
         this.inverse_projection = mat4.create();
 
         this.a_quad_xy = new Float32Array(2 * (mesh.numRegions + mesh.numTriangles));
-        this.a_quad_em = new Float32Array(2 * (mesh.numRegions + mesh.numTriangles));
+        this.a_quad_em = new Float32Array(3 * (mesh.numRegions + mesh.numTriangles));
         this.quad_elements_length = 3 * mesh.numSolidSides;
         this.quad_elements = new Int32Array(this.quad_elements_length);
         /* NOTE: The maximum number of river triangles will be when
@@ -514,6 +563,16 @@ export default class Renderer {
          * there will be 1.5 output triangles per input triangle. */
         const numRiverVertices = 1.5 /* river triangles per input triangle */ * 3 /* vertices per triangle */ * mesh.numSolidTriangles;
         this.a_river_xyww = new Float32Array(numRiverVertices * 4);
+        /* each border segment is 6 vertices of 2 floats, at most one
+         * segment per solid side */
+        this.a_border_xy = new Float32Array(12 * mesh.numSolidSides);
+        this.countryPalette = new Float32Array(3 * NUM_COUNTRIES);
+        for (let i = 0; i < NUM_COUNTRIES; i++) {
+            let [r, g, b] = countryPalette[i];
+            this.countryPalette[3*i] = r;
+            this.countryPalette[3*i+1] = g;
+            this.countryPalette[3*i+2] = b;
+        }
 
         Geometry.setMeshGeometry(mesh, this.a_quad_xy);
 
@@ -523,6 +582,7 @@ export default class Renderer {
 
         this.buffer_fullscreen = this.webgl.createBuffer({update: 'static', data: new Float32Array([-2, 0, 0, -2, 2, 2])});
         this.buffer_river_xyww = this.webgl.createBuffer({update: 'dynamic', data: this.a_river_xyww});
+        this.buffer_border_xy = this.webgl.createBuffer({update: 'dynamic', data: this.a_border_xy});
 
         this.texture_colormap = this.webgl.createTexture({data: colormap.data, width: colormap.width, height: colormap.height, filter: 'nearest'});
 
@@ -530,33 +590,60 @@ export default class Renderer {
         this.fbo_depth = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: true, internalFormat: this.webgl.gl.R16F, filter: 'nearest'}); // NOTE: linear requires adjusting parameters
         this.fbo_river = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, filter: 'linear'}); // linear makes rivers look better
         this.fbo_drape = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: true, filter: 'linear'}); // linear to smooth out edges
+        this.fbo_border = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, filter: 'linear'});
 
         this.program_river = this.webgl.createProgram('river', vert_river, frag_river, (gl, program) => {
             this.buffer_river_xyww.vertexAttribPointer(program.a_xyww, 4, gl.FLOAT, false, 0, 0);
         });
         this.program_land  = this.webgl.createProgram('land', vert_land,  frag_land, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 0, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 12, 0);
             this.buffer_quad_elements.bind();
         });
         this.program_depth = this.webgl.createProgram('depth', vert_depth, frag_depth, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 0, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 12, 0);
             this.buffer_quad_elements.bind();
         });
         this.program_drape = this.webgl.createProgram('drape', vert_drape, frag_drape, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 0, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 12, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_country, 1, gl.FLOAT, false, 12, 8);
             this.buffer_quad_elements.bind();
         });
         this.program_final = this.webgl.createProgram('final', vert_final, frag_final, (gl, program) => {
             this.buffer_fullscreen.vertexAttribPointer(program.a_uv, 2, gl.FLOAT, false, 0, 0);
+        });
+        this.program_border = this.webgl.createProgram('border', vert_border, frag_border, (gl, program) => {
+            this.buffer_border_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
         });
 
         this.screenshotCanvas = document.createElement('canvas');
         this.screenshotCanvas.width = fbo_texture_size;
         this.screenshotCanvas.height = fbo_texture_size;
         this.screenshotCallback = null;
+
+        /* Country name labels overlaid on the map (DOM, repositioned
+         * every frame to track the projection). */
+        this.countryNames = new Array(NUM_COUNTRIES).fill('');
+        this.countrySumX = new Float32Array(NUM_COUNTRIES);
+        this.countrySumY = new Float32Array(NUM_COUNTRIES);
+        this.countryCenterX = new Float32Array(NUM_COUNTRIES).fill(NaN);
+        this.countryCenterY = new Float32Array(NUM_COUNTRIES).fill(NaN);
+        this.labelLayer = document.getElementById('labels') as HTMLDivElement;
+        if (!this.labelLayer) {
+            this.labelLayer = document.createElement('div');
+            this.labelLayer.setAttribute('id', 'labels');
+            document.getElementById('map').appendChild(this.labelLayer);
+        }
+        this.countryLabels = [];
+        for (let i = 0; i < NUM_COUNTRIES; i++) {
+            const el = document.createElement('span');
+            el.setAttribute('class', 'country-name-label');
+            el.style.display = 'none';
+            this.labelLayer.appendChild(el);
+            this.countryLabels.push({el, visible: false, x: 0, y: 0});
+        }
 
         this.renderParam = undefined;
         this.startDrawingLoop();
@@ -582,6 +669,76 @@ export default class Renderer {
         this.buffer_quad_em.subdata(0, this.a_quad_em);
         this.buffer_quad_elements.subdata(0, this.quad_elements);
         this.buffer_river_xyww.subdata(0, this.a_river_xyww.subarray(0, 4 * 3 * this.numRiverTriangles));
+
+        this.numBorderSegments = Geometry.setBorderGeometry(this.mesh, this.a_quad_em, this.a_border_xy);
+        this.buffer_border_xy.subdata(0, this.a_border_xy.subarray(0, 12 * this.numBorderSegments));
+        this.computeCountryCenters();
+    }
+
+    /* Average the positions of each country's regions to get a label
+     * anchor point; NaN means the country hasn't been painted. */
+    computeCountryCenters() {
+        this.countrySumX.fill(0);
+        this.countrySumY.fill(0);
+        const counts = new Int32Array(NUM_COUNTRIES);
+        const {mesh} = this;
+        for (let r = 0; r < mesh.numSolidRegions; r++) {
+            const c = this.a_quad_em[3*r + 2];
+            if (c >= 0 && c < NUM_COUNTRIES) {
+                counts[c]++;
+                this.countrySumX[c] += mesh.x_of_r(r);
+                this.countrySumY[c] += mesh.y_of_r(r);
+            }
+        }
+        for (let c = 0; c < NUM_COUNTRIES; c++) {
+            if (counts[c] > 0) {
+                this.countryCenterX[c] = this.countrySumX[c] / counts[c];
+                this.countryCenterY[c] = this.countrySumY[c] / counts[c];
+            } else {
+                this.countryCenterX[c] = NaN;
+                this.countryCenterY[c] = NaN;
+            }
+        }
+        this.reconcileLabels();
+    }
+
+    /* Names come from the painting UI; show a label only for countries
+     * that both have a name and are painted on the map. */
+    setCountryNames(names: string[]) {
+        this.countryNames = names.slice();
+        this.reconcileLabels();
+    }
+
+    reconcileLabels() {
+        for (let c = 0; c < NUM_COUNTRIES; c++) {
+            const label = this.countryLabels[c];
+            const name = (this.countryNames[c] ?? '').trim();
+            const painted = Number.isFinite(this.countryCenterX[c]) && Number.isFinite(this.countryCenterY[c]);
+            if (name && painted) {
+                label.visible = true;
+                label.el.style.display = '';
+                label.el.textContent = name;
+                label.x = this.countryCenterX[c];
+                label.y = this.countryCenterY[c];
+            } else {
+                label.visible = false;
+                label.el.style.display = 'none';
+            }
+        }
+    }
+
+    /* Move each visible label to its country's centroid in screen space. */
+    updateLabelPositions() {
+        const layer = this.labelLayer;
+        const W = layer.clientWidth, H = layer.clientHeight;
+        if (W <= 0 || H <= 0) return;
+        const v = vec4.create();
+        for (const label of this.countryLabels) {
+            if (!label.visible) continue;
+            vec4.transformMat4(v, vec4.fromValues(label.x, label.y, 0, 1), this.projection);
+            label.el.style.transform =
+                `translate(${((v[0] + 1) / 2 * W).toFixed(1)}px, ${((1 - v[1]) / 2 * H).toFixed(1)}px)`;
+        }
     }
 
     /* Allow drawing at a different resolution than the internal texture size */
@@ -620,6 +777,18 @@ export default class Renderer {
         });
     }
 
+    drawBorders() {
+        this.drawGeneric(this.program_border, this.fbo_border, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.topdown);
+
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            gl.blendEquation(gl.FUNC_ADD);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6 * this.numBorderSegments);
+        });
+    }
+
     drawLand(outline_water: number) {
         this.drawGeneric(this.program_land, this.fbo_land, (gl, program) => {
             gl.uniformMatrix4fv(program.u_projection, false, this.topdown);
@@ -654,11 +823,18 @@ export default class Renderer {
             gl.uniform1f(program.u_outline_strength, renderParam.outline_strength);
             gl.uniform1f(program.u_outline_threshold, renderParam.outline_threshold / 1000);
             gl.uniform1f(program.u_biome_colors, renderParam.biome_colors);
+            gl.uniform1f(program.u_country_strength, renderParam.country_strength);
+            gl.uniform1f(program.u_country_borders, renderParam.country_borders);
+
+            /* uniform arrays are reflected as "u_countrypalette[0]" */
+            const u_countrypalette = program['u_countrypalette[0]'] ?? program.u_countrypalette;
+            if (u_countrypalette) gl.uniform3fv(u_countrypalette, this.countryPalette);
 
             this.texture_colormap.activate(gl.TEXTURE0, program.u_colormap);
             this.fbo_land.texture.activate(gl.TEXTURE1, program.u_elevation);
             this.fbo_river.texture.activate(gl.TEXTURE2, program.u_water);
             this.fbo_depth.texture.activate(gl.TEXTURE3, program.u_depth);
+            this.fbo_border.texture.activate(gl.TEXTURE4, program.u_border);
 
             gl.drawElements(gl.TRIANGLES, this.quad_elements_length, gl.UNSIGNED_INT, 0);
         });
@@ -680,6 +856,7 @@ export default class Renderer {
             this.fbo_river.clear(0, 0, 0, 0);
             this.fbo_depth.clear(0, 0, 0, 1);
             this.fbo_drape.clear(0.3, 0.3, 0.35, 1);
+            this.fbo_border.clear(0, 0, 0, 0);
             gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         };
 
@@ -723,10 +900,16 @@ export default class Renderer {
                 this.drawDepth();
             }
 
+            if (this.numBorderSegments > 0) {
+                this.drawBorders();
+            }
+
             this.drawDrape(renderParam);
 
             /* Draw the final texture to the canvas; this slightly blurs the outlines */
             this.drawFinal([0.5 / fbo_texture_size, 0.5 / fbo_texture_size]);
+
+            this.updateLabelPositions();
 
             if (this.screenshotCallback) {
                 const ctx = this.screenshotCanvas.getContext('2d');

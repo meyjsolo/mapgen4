@@ -14,6 +14,7 @@
 
 import {createNoise2D} from 'simplex-noise';
 import {makeRandFloat} from '@redblobgames/prng';
+import {NUM_COUNTRIES, countryPalette} from "./countries.ts";
 
 const CANVAS_SIZE = 128;
 
@@ -33,9 +34,13 @@ class Generator {
     island = 0;
     userHasPainted = false;
     elevation: Float32Array;
+    country: Float32Array;
+    countryHasPainted = false;
     
     constructor () {
         this.elevation = new Float32Array(CANVAS_SIZE * CANVAS_SIZE);
+        // -1 means "no country"; otherwise a country palette index
+        this.country = new Float32Array(CANVAS_SIZE * CANVAS_SIZE).fill(-1);
     }
 
     setElevationParam(elevationParam) {
@@ -87,6 +92,8 @@ class Generator {
         }
 
         this.userHasPainted = false;
+        this.country.fill(-1);
+        this.countryHasPainted = false;
     }
 
     /**
@@ -127,22 +134,86 @@ class Generator {
 
         this.userHasPainted = true;
     }
+
+    /**
+     * Stamp the current country id onto a constant-filled disc. x0, y0
+     * should be 0 to 1; radius is the brush size in canvas texels.
+     */
+    paintCountryAt(countryId: number, x0: number, y0: number, outerRadius: number) {
+        let {country} = this;
+        let xc = (x0 * CANVAS_SIZE) | 0, yc = (y0 * CANVAS_SIZE) | 0;
+        let top = Math.ceil(Math.max(0, yc - outerRadius)),
+            bottom = Math.floor(Math.min(CANVAS_SIZE-1, yc + outerRadius));
+        for (let y = top; y <= bottom; y++) {
+            let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
+            let left = Math.max(0, xc - s),
+                right = Math.min(CANVAS_SIZE-1, xc + s);
+            for (let x = left; x <= right; x++) {
+                country[y * CANVAS_SIZE + x] = countryId;
+            }
+        }
+
+        this.countryHasPainted = true;
+    }
 }
 let heightMap = new Generator();
+
+/* country names, one per palette slot, shown on the map when painted */
+const countryNames: string[] = Array.from({length: NUM_COUNTRIES}, () => '');
 
 let exported = {
     size: CANVAS_SIZE,
     onUpdate: () => {},
     screenToWorldCoords: coords => coords,
     constraints: heightMap.elevation,
+    country: heightMap.country,
+    countryNames,
     setElevationParam: elevationParam => heightMap.setElevationParam(elevationParam),
     userHasPainted: () => heightMap.userHasPainted,
+    countryHasPainted: () => heightMap.countryHasPainted,
 };
 
 document.getElementById('button-reset').addEventListener('click', () => {
     heightMap.generate();
     exported.onUpdate();
 });
+
+
+/* Country selection: each palette swatch is both the palette and the
+ * "country" tool. Clicking a swatch selects that country and switches
+ * the active tool to country painting. Each row also has a text input
+ * for the country name, shown on the map once the country is painted.
+ */
+let currentCountry = 0;
+const countryToolbar = document.getElementById('countries');
+for (let i = 0; i < NUM_COUNTRIES; i++) {
+    const [r, g, b] = countryPalette[i];
+    const row = document.createElement('div');
+    row.setAttribute('class', 'country-row');
+
+    const btn = document.createElement('button');
+    btn.setAttribute('id', `country-${i}`);
+    btn.setAttribute('title', `country ${i+1} (paint with this brush)`);
+    btn.style.background = `rgb(${255*r|0},${255*g|0},${255*b|0})`;
+    btn.addEventListener('click', () => {
+        currentTool = 'country';
+        currentCountry = i;
+        displayCurrentTool();
+    });
+
+    const input = document.createElement('input');
+    input.setAttribute('id', `country-name-${i}`);
+    input.setAttribute('type', 'text');
+    input.setAttribute('placeholder', 'name');
+    input.addEventListener('input', () => {
+        countryNames[i] = input.value;
+        exported.onUpdate();
+    });
+
+    row.appendChild(btn);
+    row.appendChild(input);
+    countryToolbar.appendChild(row);
+}
 
 
 const SIZES = {
@@ -168,8 +239,13 @@ function displayCurrentTool() {
     for (let c of document.querySelectorAll("."+className)) {
         c.classList.remove(className);
     }
-    document.getElementById(currentTool).classList.add(className);
+    if (currentTool !== 'country') {
+        document.getElementById(currentTool).classList.add(className);
+    }
     document.getElementById(currentSize).classList.add(className);
+    if (currentTool === 'country') {
+        document.getElementById(`country-${currentCountry}`).classList.add(className);
+    }
 }
 
 const controls: [string, string, () => void][] = [
@@ -248,8 +324,14 @@ function setUpPaintEventHandling() {
             // Hold down shift to paint slowly
             brushSize = {...brushSize, rate: brushSize.rate/4};
         }
-        heightMap.paintAt(TOOLS[currentTool], coords[0], coords[1],
-                          brushSize, nowMs - timestamp);
+        if (currentTool === 'country') {
+            // Countries stamp the selected country id as a constant
+            // disc, so moving the brush edits the border directly.
+            heightMap.paintCountryAt(currentCountry, coords[0], coords[1], brushSize.outerRadius);
+        } else {
+            heightMap.paintAt(TOOLS[currentTool], coords[0], coords[1],
+                              brushSize, nowMs - timestamp);
+        }
         timestamp = nowMs;
         exported.onUpdate();
     }
