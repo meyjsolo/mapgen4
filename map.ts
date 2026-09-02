@@ -144,6 +144,7 @@ export default class Map {
             mesh.t_around_r(r, t_around_r);
             let best = -1, bestCount = 0;
             for (let t of t_around_r) {
+                if (t >= numSolidTriangles) continue; // ghost triangles have unassigned country 0
                 let c = country_t[t];
                 if (c < 0 || c >= NUM_COUNTRIES) continue;
                 let count = ++votes[c];

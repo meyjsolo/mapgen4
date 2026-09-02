@@ -175,6 +175,11 @@ let exported = {
 
 document.getElementById('button-reset').addEventListener('click', () => {
     heightMap.generate();
+    for (let i = 0; i < NUM_COUNTRIES; i++) {
+        countryNames[i] = '';
+        const input = document.getElementById(`country-name-${i}`) as HTMLInputElement;
+        if (input) { input.value = ''; }
+    }
     exported.onUpdate();
 });
 
