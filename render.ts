@@ -435,7 +435,7 @@ const frag_drape = `
         if (z <= 0.5 && max(depth1, depth2) > 1.0/256.0 && neighboring_river <= 0.2) { outline += u_outline_coast * 256.0 * (max(depth1, depth2) - 2.0*(z - 0.5)); }
 
         // Tint land with the country color and draw dark national borders
-        if (v_em.x >= 0.0 && v_country >= 0.25) {
+        if (v_em.x >= 0.0 && v_country >= 0.0) {
             int slot = int(clamp(floor(v_country + 0.5), 0.0, 7.0));
             vec3 country_color = u_countrypalette[slot];
             biome_color = mix(biome_color, country_color, u_country_strength);
@@ -501,6 +501,14 @@ export default class Renderer {
     a_river_xyww: Float32Array;
     a_border_xy: Float32Array;
     countryPalette: Float32Array;
+
+    countryNames: string[];
+    countrySumX: Float32Array;
+    countrySumY: Float32Array;
+    countryCenterX: Float32Array;
+    countryCenterY: Float32Array;
+    labelLayer: HTMLDivElement;
+    countryLabels: {el: HTMLSpanElement; visible: boolean; x: number; y: number}[];
 
     screenshotCanvas: HTMLCanvasElement;
     screenshotCallback: () => void;
@@ -615,6 +623,28 @@ export default class Renderer {
         this.screenshotCanvas.height = fbo_texture_size;
         this.screenshotCallback = null;
 
+        /* Country name labels overlaid on the map (DOM, repositioned
+         * every frame to track the projection). */
+        this.countryNames = new Array(NUM_COUNTRIES).fill('');
+        this.countrySumX = new Float32Array(NUM_COUNTRIES);
+        this.countrySumY = new Float32Array(NUM_COUNTRIES);
+        this.countryCenterX = new Float32Array(NUM_COUNTRIES).fill(NaN);
+        this.countryCenterY = new Float32Array(NUM_COUNTRIES).fill(NaN);
+        this.labelLayer = document.getElementById('labels') as HTMLDivElement;
+        if (!this.labelLayer) {
+            this.labelLayer = document.createElement('div');
+            this.labelLayer.setAttribute('id', 'labels');
+            document.getElementById('map').appendChild(this.labelLayer);
+        }
+        this.countryLabels = [];
+        for (let i = 0; i < NUM_COUNTRIES; i++) {
+            const el = document.createElement('span');
+            el.setAttribute('class', 'country-name-label');
+            el.style.display = 'none';
+            this.labelLayer.appendChild(el);
+            this.countryLabels.push({el, visible: false, x: 0, y: 0});
+        }
+
         this.renderParam = undefined;
         this.startDrawingLoop();
     }
@@ -642,6 +672,73 @@ export default class Renderer {
 
         this.numBorderSegments = Geometry.setBorderGeometry(this.mesh, this.a_quad_em, this.a_border_xy);
         this.buffer_border_xy.subdata(0, this.a_border_xy.subarray(0, 12 * this.numBorderSegments));
+        this.computeCountryCenters();
+    }
+
+    /* Average the positions of each country's regions to get a label
+     * anchor point; NaN means the country hasn't been painted. */
+    computeCountryCenters() {
+        this.countrySumX.fill(0);
+        this.countrySumY.fill(0);
+        const counts = new Int32Array(NUM_COUNTRIES);
+        const {mesh} = this;
+        for (let r = 0; r < mesh.numSolidRegions; r++) {
+            const c = this.a_quad_em[3*r + 2];
+            if (c >= 0 && c < NUM_COUNTRIES) {
+                counts[c]++;
+                this.countrySumX[c] += mesh.x_of_r(r);
+                this.countrySumY[c] += mesh.y_of_r(r);
+            }
+        }
+        for (let c = 0; c < NUM_COUNTRIES; c++) {
+            if (counts[c] > 0) {
+                this.countryCenterX[c] = this.countrySumX[c] / counts[c];
+                this.countryCenterY[c] = this.countrySumY[c] / counts[c];
+            } else {
+                this.countryCenterX[c] = NaN;
+                this.countryCenterY[c] = NaN;
+            }
+        }
+        this.reconcileLabels();
+    }
+
+    /* Names come from the painting UI; show a label only for countries
+     * that both have a name and are painted on the map. */
+    setCountryNames(names: string[]) {
+        this.countryNames = names.slice();
+        this.reconcileLabels();
+    }
+
+    reconcileLabels() {
+        for (let c = 0; c < NUM_COUNTRIES; c++) {
+            const label = this.countryLabels[c];
+            const name = (this.countryNames[c] ?? '').trim();
+            const painted = Number.isFinite(this.countryCenterX[c]) && Number.isFinite(this.countryCenterY[c]);
+            if (name && painted) {
+                label.visible = true;
+                label.el.style.display = '';
+                label.el.textContent = name;
+                label.x = this.countryCenterX[c];
+                label.y = this.countryCenterY[c];
+            } else {
+                label.visible = false;
+                label.el.style.display = 'none';
+            }
+        }
+    }
+
+    /* Move each visible label to its country's centroid in screen space. */
+    updateLabelPositions() {
+        const layer = this.labelLayer;
+        const W = layer.clientWidth, H = layer.clientHeight;
+        if (W <= 0 || H <= 0) return;
+        const v = vec4.create();
+        for (const label of this.countryLabels) {
+            if (!label.visible) continue;
+            vec4.transformMat4(v, vec4.fromValues(label.x, label.y, 0, 1), this.projection);
+            label.el.style.transform =
+                `translate(${((v[0] + 1) / 2 * W).toFixed(1)}px, ${((1 - v[1]) / 2 * H).toFixed(1)}px)`;
+        }
     }
 
     /* Allow drawing at a different resolution than the internal texture size */
@@ -811,6 +908,8 @@ export default class Renderer {
 
             /* Draw the final texture to the canvas; this slightly blurs the outlines */
             this.drawFinal([0.5 / fbo_texture_size, 0.5 / fbo_texture_size]);
+
+            this.updateLabelPositions();
 
             if (this.screenshotCallback) {
                 const ctx = this.screenshotCanvas.getContext('2d');

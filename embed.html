@@ -11,12 +11,12 @@
     #ui {
         display: grid;
         min-height: calc(100vmin - 130px);
-        grid-template-rows: repeat(4, 40px) calc(100vmin - 130px - 160px - 40px);
-        grid-template-columns: 1fr calc(100vmin - 130px) repeat(4, 30px) 1fr;
+        grid-template-rows: repeat(3, 40px) 240px calc(100vmin - 130px - 120px - 240px);
+        grid-template-columns: 1fr calc(100vmin - 130px) repeat(4, 44px) 1fr;
         grid-row-gap: 10px;
         grid-column-gap: 10px;
     }
-    #map        { grid-area: 1 / 2 / span 5 / span 1; width:100%; height:100%; }
+    #map        { grid-area: 1 / 2 / span 5 / span 1; width:100%; height:100%; position: relative; }
     #tiny       { grid-area: 1 / 3 / span 1 / span 1; }
     #small      { grid-area: 1 / 4 / span 1 / span 1; }
     #medium     { grid-area: 1 / 5 / span 1 / span 1; }
@@ -25,10 +25,14 @@
     #shallow    { grid-area: 2 / 5 / span 1 / span 2; }
     #valley     { grid-area: 3 / 3 / span 1 / span 2; }
     #mountain   { grid-area: 3 / 5 / span 1 / span 2; }
-    #countries  { grid-area: 4 / 3 / span 1 / span 4; display: flex; gap: 6px; align-items: center; }
-    #countries .country-label { flex: 0 0 auto; font-size: 66%; margin-right: 4px; white-space: nowrap; }
-    #countries button { flex: 1; border-radius: 50%; min-width: 0; }
+    #countries  { grid-area: 4 / 3 / span 1 / span 4; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+    #countries .country-label { flex: 0 0 auto; font-size: 66%; }
+    #countries .country-row { display: flex; gap: 4px; align-items: center; }
+    #countries .country-row button { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%; }
+    #countries .country-row input { flex: 1; min-width: 0; font-size: 66%; height: 20px; box-sizing: border-box; }
     #countries button.current-control { outline: 3px solid hsl(220, 50%, 50%); }
+    #labels { position: absolute; top: 0; left: 0; width: 100%; height: 100%; overflow: hidden; pointer-events: none; }
+    .country-name-label { position: absolute; left: 0; top: 0; transform: translate(-50%, -50%); background: rgba(0,0,0,0.55); color: #fff; padding: 1px 6px; border-radius: 3px; font: 13px sans-serif; white-space: nowrap; }
     #sliders    { grid-area: 5 / 3 / span 1 / span 4; overflow-y: scroll; overflow-x: clip; line-height: 1.1; }
 
     @media (orientation: portrait) {
@@ -96,7 +100,7 @@
     <button id="button-reset">Reset</button>
   </div>
   
-  <div id="map"><canvas id="mapgen4" width="2048" height="2048"/></div>
+  <div id="map"><canvas id="mapgen4" width="2048" height="2048"></canvas><div id="labels"></div></div>
   </div>
   <script defer="defer" src="build/_bundle.js"></script>
 </div>

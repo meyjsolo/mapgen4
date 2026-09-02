@@ -176,6 +176,7 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
         render.a_river_xyww = new Float32Array(a_river_xyww_buffer);
         render.numRiverTriangles = numRiverTriangles;
         render.updateMap();
+        render.setCountryNames(Painting.countryNames);
         redraw();
         if (workRequested) {
             requestAnimationFrame(() => {

@@ -158,12 +158,16 @@ class Generator {
 }
 let heightMap = new Generator();
 
+/* country names, one per palette slot, shown on the map when painted */
+const countryNames: string[] = Array.from({length: NUM_COUNTRIES}, () => '');
+
 let exported = {
     size: CANVAS_SIZE,
     onUpdate: () => {},
     screenToWorldCoords: coords => coords,
     constraints: heightMap.elevation,
     country: heightMap.country,
+    countryNames,
     setElevationParam: elevationParam => heightMap.setElevationParam(elevationParam),
     userHasPainted: () => heightMap.userHasPainted,
     countryHasPainted: () => heightMap.countryHasPainted,
@@ -177,11 +181,16 @@ document.getElementById('button-reset').addEventListener('click', () => {
 
 /* Country selection: each palette swatch is both the palette and the
  * "country" tool. Clicking a swatch selects that country and switches
- * the active tool to country painting. */
+ * the active tool to country painting. Each row also has a text input
+ * for the country name, shown on the map once the country is painted.
+ */
 let currentCountry = 0;
 const countryToolbar = document.getElementById('countries');
 for (let i = 0; i < NUM_COUNTRIES; i++) {
     const [r, g, b] = countryPalette[i];
+    const row = document.createElement('div');
+    row.setAttribute('class', 'country-row');
+
     const btn = document.createElement('button');
     btn.setAttribute('id', `country-${i}`);
     btn.setAttribute('title', `country ${i+1} (paint with this brush)`);
@@ -191,7 +200,19 @@ for (let i = 0; i < NUM_COUNTRIES; i++) {
         currentCountry = i;
         displayCurrentTool();
     });
-    countryToolbar.appendChild(btn);
+
+    const input = document.createElement('input');
+    input.setAttribute('id', `country-name-${i}`);
+    input.setAttribute('type', 'text');
+    input.setAttribute('placeholder', 'name');
+    input.addEventListener('input', () => {
+        countryNames[i] = input.value;
+        exported.onUpdate();
+    });
+
+    row.appendChild(btn);
+    row.appendChild(input);
+    countryToolbar.appendChild(row);
 }
 
 
