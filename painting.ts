@@ -19,6 +19,7 @@ import {
     CITY_NONE, CITY_WATER, CITY_PARK, CITY_RESIDENTIAL, CITY_COMMERCIAL, cityPalette,
     OBJ_NONE, OBJ_ROAD, OBJ_BUILDING, OBJ_TREE,
 } from "./city.ts";
+import {TERRAIN_NONE, TERRAIN_SNOW, NUM_TERRAINS} from "./terrains.ts";
 
 const CANVAS_SIZE = 128;
 
@@ -44,6 +45,8 @@ class Generator {
     cityHasPainted = false;
     objects: Float32Array;
     objectsHasPainted = false;
+    terrain: Float32Array;
+    terrainHasPainted = false;
     
     constructor () {
         this.elevation = new Float32Array(CANVAS_SIZE * CANVAS_SIZE);
@@ -53,6 +56,8 @@ class Generator {
         this.city = new Float32Array(CANVAS_SIZE * CANVAS_SIZE).fill(-1);
         // 0 = automatic, -1 = erased, otherwise an object bitmask
         this.objects = new Float32Array(CANVAS_SIZE * CANVAS_SIZE).fill(0);
+        // 0 = automatic; otherwise an explicit terrain type (e.g. snow)
+        this.terrain = new Float32Array(CANVAS_SIZE * CANVAS_SIZE).fill(0);
     }
 
     setElevationParam(elevationParam) {
@@ -110,6 +115,8 @@ class Generator {
         this.cityHasPainted = false;
         this.objects.fill(0);
         this.objectsHasPainted = false;
+        this.terrain.fill(0);
+        this.terrainHasPainted = false;
     }
 
     /**
@@ -241,6 +248,27 @@ class Generator {
 
         this.objectsHasPainted = true;
     }
+
+    /**
+     * Stamp an explicit terrain type (e.g. snow) onto a disc. Painted
+     * terrain overrides the automatic biome coloring for those regions.
+     */
+    paintTerrainAt(terrainType: number, x0: number, y0: number, outerRadius: number) {
+        let {terrain} = this;
+        let xc = (x0 * CANVAS_SIZE) | 0, yc = (y0 * CANVAS_SIZE) | 0;
+        let top = Math.ceil(Math.max(0, yc - outerRadius)),
+            bottom = Math.floor(Math.min(CANVAS_SIZE-1, yc + outerRadius));
+        for (let y = top; y <= bottom; y++) {
+            let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
+            let left = Math.max(0, xc - s),
+                right = Math.min(CANVAS_SIZE-1, xc + s);
+            for (let x = left; x <= right; x++) {
+                terrain[y * CANVAS_SIZE + x] = terrainType;
+            }
+        }
+
+        this.terrainHasPainted = true;
+    }
 }
 
 /* Each scene (wild / city) is a completely independent map: its own
@@ -264,6 +292,7 @@ let exported = {
     countryHasPainted: () => g().countryHasPainted,
     cityHasPainted: () => g().cityHasPainted,
     objectsHasPainted: () => g().objectsHasPainted,
+    terrainHasPainted: () => g().terrainHasPainted,
     setScene: (scene: SceneName) => { setScene(scene); },
 };
 /* The active scene's constraint arrays are exposed as live getters. */
@@ -271,6 +300,7 @@ Object.defineProperty(exported, 'constraints', { get: () => g().elevation });
 Object.defineProperty(exported, 'country', { get: () => g().country });
 Object.defineProperty(exported, 'city', { get: () => g().city });
 Object.defineProperty(exported, 'objects', { get: () => g().objects });
+Object.defineProperty(exported, 'terrain', { get: () => g().terrain });
 Object.defineProperty(exported, 'countryNames', { get: () => sceneNames() });
 
 document.getElementById('button-reset').addEventListener('click', () => {
@@ -377,12 +407,42 @@ for (let t of CITY_OBJECT_TOOLS) {
     cityToolbar.appendChild(row);
 }
 
+/* Terrain brushes: paint an explicit terrain type (snow, ...) over the
+ * wild map, overriding the automatic biome colors. Snow also raises the
+ * elevation (like the mountain brush) so it gets real mountain relief. */
+const TERRAIN_TOOLS = [
+    {key: 'snow', label: 'snow', color: 'hsl(210, 30%, 92%)', type: TERRAIN_SNOW, elevation: +1.0},
+];
+const TERRAIN_TOOL_KEYS = TERRAIN_TOOLS.map(t => t.key);
+const terrainToolbar = document.getElementById('terrain-tools');
+for (let t of TERRAIN_TOOLS) {
+    const row = document.createElement('div');
+    row.setAttribute('class', 'terrain-row');
+    const btn = document.createElement('button');
+    btn.setAttribute('id', `terrain-tool-${t.key}`);
+    btn.style.background = t.color;
+    btn.setAttribute('title', t.label);
+    btn.addEventListener('click', () => {
+        currentTool = t.key;
+        displayCurrentTool();
+    });
+    const span = document.createElement('span');
+    span.appendChild(document.createTextNode(t.label));
+    row.appendChild(btn);
+    row.appendChild(span);
+    terrainToolbar.appendChild(row);
+}
+
 function setScene(scene: SceneName) {
     activeScene = scene;
     /* countries row and city object tools share the same panel */
     document.getElementById('countries').style.display = scene === 'city' ? 'none' : '';
     document.getElementById('city-tools').style.display = scene === 'city' ? 'flex' : 'none';
+    document.getElementById('terrain-tools').style.display = scene === 'city' ? 'none' : '';
     if (scene === 'wild' && CITY_TOOL_KEYS.includes(currentTool)) {
+        currentTool = 'mountain';
+    }
+    if (scene === 'city' && TERRAIN_TOOL_KEYS.includes(currentTool)) {
         currentTool = 'mountain';
     }
     for (const name of TOOL_BUTTONS) {
@@ -415,7 +475,10 @@ function displayCurrentTool() {
         c.classList.remove(className);
     }
     if (currentTool !== 'country') {
-        const id = CITY_TOOL_KEYS.includes(currentTool) ? `city-tool-${currentTool}` : currentTool;
+        let id;
+        if (CITY_TOOL_KEYS.includes(currentTool)) { id = `city-tool-${currentTool}`; }
+        else if (TERRAIN_TOOL_KEYS.includes(currentTool)) { id = `terrain-tool-${currentTool}`; }
+        else { id = currentTool; }
         document.getElementById(id).classList.add(className);
     }
     document.getElementById(currentSize).classList.add(className);
@@ -509,6 +572,16 @@ function setUpPaintEventHandling() {
             // Countries stamp the selected country id as a constant
             // disc, so moving the brush edits the border directly.
             g().paintCountryAt(currentCountry, coords[0], coords[1], brushSize.outerRadius);
+        } else if (TERRAIN_TOOL_KEYS.includes(currentTool)) {
+            // Terrain brushes paint an explicit terrain type (snow, ...).
+            // Snow also raises the elevation like the mountain brush, so
+            // the painted area gets real mountain relief (white snow).
+            const terrainTool = TERRAIN_TOOLS.find(t => t.key === currentTool)!;
+            if (terrainTool.elevation !== undefined) {
+                g().paintAt({elevation: terrainTool.elevation}, coords[0], coords[1],
+                            brushSize, nowMs - timestamp);
+            }
+            g().paintTerrainAt(terrainTool.type, coords[0], coords[1], brushSize.outerRadius);
         } else if (activeScene === 'city') {
             // City brushes: zone stamps, or paint/erase objects.
             if (currentTool === 'road') {

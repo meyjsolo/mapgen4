@@ -11,6 +11,7 @@ import colormap from "./colormap.ts";
 import Geometry from "./geometry.ts";
 import {NUM_COUNTRIES, countryPalette} from "./countries.ts";
 import {NUM_CITY_ZONES, cityPalette as cityColors} from "./city.ts";
+import {NUM_TERRAINS, terrainPalette as terrainColors} from "./terrains.ts";
 import type {Mesh} from "./types.d.ts";
 
 //////////////////////////////////////////////////////////////////////
@@ -333,14 +334,17 @@ const vert_drape = `
     in vec2 a_em;
     in float a_country;
     in float a_zone;
+    in float a_terrain;
     out vec2 v_em, v_uv, v_xy;
     out float v_z;
     out float v_country;
     out float v_zone;
+    out float v_terrain;
     void main() {
         v_em = a_em;
         v_country = a_country;
         v_zone = a_zone;
+        v_terrain = a_terrain;
         vec2 xy_clamped = clamp(a_xy, vec2(0, 0), vec2(1000, 1000));
         v_z = max(0.0, a_em.x); // oceans with e<0 still rendered at z=0
         if (xy_clamped != a_xy) { // boundary points
@@ -348,6 +352,7 @@ const vert_drape = `
             v_em = vec2(0.0, 0.0);
             v_country = -1.0;
             v_zone = -1.0;
+            v_terrain = -1.0;
         }
         vec4 pos = vec4(u_projection * vec4(xy_clamped, v_z, 1));
         v_uv = a_xy / 1000.0;
@@ -373,10 +378,12 @@ const frag_drape = `
                   u_city_mode, u_road_strength;
     uniform vec3 u_countrypalette[8];
     uniform vec3 u_citypalette[4];
+    uniform vec3 u_terrainpalette[8];
     in vec2 v_uv, v_xy, v_em;
     in float v_z;
     in float v_country;
     in float v_zone;
+    in float v_terrain;
     out vec4 out_fragcolor;
 
     const vec3 neutral_land_biome = vec3(0.9, 0.8, 0.7);
@@ -447,6 +454,12 @@ const frag_drape = `
         if (u_city_mode > 0.5 && v_zone >= 0.0) {
             int zi = int(clamp(floor(v_zone + 0.5), 0.0, 3.0));
             biome_color = u_citypalette[zi];
+        }
+
+        // Explicit terrain (e.g. snow): override the biome color.
+        if (v_terrain > 0.5) {
+            int ti = int(clamp(floor(v_terrain + 0.5), 0.0, 7.0));
+            biome_color = u_terrainpalette[ti];
         }
 
         // Tint land with the country color and draw dark national borders
@@ -556,6 +569,7 @@ export default class Renderer {
     a_trees: Float32Array;
     countryPalette: Float32Array;
     cityPalette: Float32Array;
+    terrainPalette: Float32Array;
 
     countryNames: string[];
     countrySumX: Float32Array;
@@ -617,7 +631,7 @@ export default class Renderer {
         this.a_quad_xy = new Float32Array(2 * (mesh.numRegions + mesh.numTriangles));
         /* per-vertex layout: elevation, rainfall, country id, city zone,
          * object mask */
-        this.a_quad_em = new Float32Array(5 * (mesh.numRegions + mesh.numTriangles));
+        this.a_quad_em = new Float32Array(6 * (mesh.numRegions + mesh.numTriangles));
         this.quad_elements_length = 3 * mesh.numSolidSides;
         this.quad_elements = new Int32Array(this.quad_elements_length);
         /* NOTE: The maximum number of river triangles will be when
@@ -649,6 +663,13 @@ export default class Renderer {
             this.cityPalette[3*i+1] = g;
             this.cityPalette[3*i+2] = b;
         }
+        this.terrainPalette = new Float32Array(3 * NUM_TERRAINS);
+        for (let i = 0; i < NUM_TERRAINS; i++) {
+            let [r, g, b] = terrainColors[i];
+            this.terrainPalette[3*i] = r;
+            this.terrainPalette[3*i+1] = g;
+            this.terrainPalette[3*i+2] = b;
+        }
 
         Geometry.setMeshGeometry(mesh, this.a_quad_xy);
 
@@ -677,19 +698,20 @@ export default class Renderer {
         });
         this.program_land  = this.webgl.createProgram('land', vert_land,  frag_land, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 20, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 24, 0);
             this.buffer_quad_elements.bind();
         });
         this.program_depth = this.webgl.createProgram('depth', vert_depth, frag_depth, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 20, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 24, 0);
             this.buffer_quad_elements.bind();
         });
         this.program_drape = this.webgl.createProgram('drape', vert_drape, frag_drape, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 20, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_country, 1, gl.FLOAT, false, 20, 8);
-            this.buffer_quad_em.vertexAttribPointer(program.a_zone, 1, gl.FLOAT, false, 20, 12);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 24, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_country, 1, gl.FLOAT, false, 24, 8);
+            this.buffer_quad_em.vertexAttribPointer(program.a_zone, 1, gl.FLOAT, false, 24, 12);
+            this.buffer_quad_em.vertexAttribPointer(program.a_terrain, 1, gl.FLOAT, false, 24, 20);
             this.buffer_quad_elements.bind();
         });
         this.program_final = this.webgl.createProgram('final', vert_final, frag_final, (gl, program) => {
@@ -782,7 +804,7 @@ export default class Renderer {
         const counts = new Int32Array(NUM_COUNTRIES);
         const {mesh} = this;
         for (let r = 0; r < mesh.numSolidRegions; r++) {
-            const c = this.a_quad_em[5*r + 2];
+            const c = this.a_quad_em[6*r + 2];
             if (c >= 0 && c < NUM_COUNTRIES) {
                 counts[c]++;
                 this.countrySumX[c] += mesh.x_of_r(r);
@@ -970,6 +992,8 @@ export default class Renderer {
             if (u_countrypalette) gl.uniform3fv(u_countrypalette, this.countryPalette);
             const u_citypalette = program['u_citypalette[0]'] ?? program.u_citypalette;
             if (u_citypalette) gl.uniform3fv(u_citypalette, this.cityPalette);
+            const u_terrainpalette = program['u_terrainpalette[0]'] ?? program.u_terrainpalette;
+            if (u_terrainpalette) gl.uniform3fv(u_terrainpalette, this.terrainPalette);
 
             this.texture_colormap.activate(gl.TEXTURE0, program.u_colormap);
             this.fbo_land.texture.activate(gl.TEXTURE1, program.u_elevation);

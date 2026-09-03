@@ -242,9 +242,10 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
         let countryHasPainted = Painting.countryHasPainted();
         let cityHasPainted = Painting.cityHasPainted();
         let objectsHasPainted = Painting.objectsHasPainted();
+        let terrainHasPainted = Painting.terrainHasPainted();
         (document.querySelector("#slider-seed input") as HTMLInputElement).disabled = userHasPainted;
         (document.querySelector("#slider-island input") as HTMLInputElement).disabled = userHasPainted;
-        (document.querySelector("#button-reset") as HTMLInputElement).disabled = !(userHasPainted || countryHasPainted || cityHasPainted || objectsHasPainted);
+        (document.querySelector("#button-reset") as HTMLInputElement).disabled = !(userHasPainted || countryHasPainted || cityHasPainted || objectsHasPainted || terrainHasPainted);
     }
     
     function generate() {
@@ -262,6 +263,7 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
                     country: Painting.country,
                     city: Painting.city,
                     objects: Painting.objects,
+                    terrain: Painting.terrain,
                 },
                 quad_elements_buffer: render.quad_elements.buffer,
                 a_quad_em_buffer: render.a_quad_em.buffer,

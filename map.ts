@@ -16,6 +16,7 @@ import {
     CITY_NONE, CITY_WATER, CITY_PARK, CITY_RESIDENTIAL, CITY_COMMERCIAL, NUM_CITY_ZONES,
     OBJ_NONE,
 } from "./city.ts";
+import {TERRAIN_NONE} from "./terrains.ts";
 import type {Mesh} from "./types.d.ts";
 
 type PrecalculatedNoise = {
@@ -115,6 +116,8 @@ export default class Map {
     city_r: Int8Array;
     object_t: Int8Array;
     object_r: Int8Array;
+    terrain_t: Int8Array;
+    terrain_r: Int8Array;
 
     constructor (public mesh: Mesh, public t_peaks: number[], param: any) {
         this.spacing = param.spacing;
@@ -136,6 +139,8 @@ export default class Map {
         this.city_r              = new Int8Array(mesh.numRegions);
         this.object_t            = new Int8Array(mesh.numTriangles);
         this.object_r            = new Int8Array(mesh.numRegions);
+        this.terrain_t           = new Int8Array(mesh.numTriangles);
+        this.terrain_r           = new Int8Array(mesh.numRegions);
     }
 
     /**
@@ -256,6 +261,29 @@ export default class Map {
             let xi = clamp((x * size) | 0, 0, size - 1),
                 yi = clamp((y * size) | 0, 0, size - 1);
             object_r[r] = objectGrid[yi * size + xi];
+        }
+    }
+
+    /**
+     * Assign the painted terrain type (e.g. snow) by sampling the
+     * constraint canvas at each region and triangle centroid. 0 means
+     * "automatic" — the biome colors are used as usual.
+     */
+    assignTerrain(terrainGrid: Float32Array, size: number) {
+        let {mesh, terrain_t, terrain_r} = this;
+        let {numSolidTriangles} = mesh;
+        for (let t = 0; t < numSolidTriangles; t++) {
+            let x = mesh.x_of_t(t) / 1000, y = mesh.y_of_t(t) / 1000;
+            let xi = clamp((x * size) | 0, 0, size - 1),
+                yi = clamp((y * size) | 0, 0, size - 1);
+            terrain_t[t] = terrainGrid[yi * size + xi];
+        }
+        for (let r = 0; r < mesh.numRegions; r++) {
+            if (mesh.is_ghost_r(r)) { terrain_r[r] = TERRAIN_NONE; continue; }
+            let x = mesh.x_of_r(r) / 1000, y = mesh.y_of_r(r) / 1000;
+            let xi = clamp((x * size) | 0, 0, size - 1),
+                yi = clamp((y * size) | 0, 0, size - 1);
+            terrain_r[r] = terrainGrid[yi * size + xi];
         }
     }
 
