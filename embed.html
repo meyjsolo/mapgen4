@@ -25,9 +25,9 @@
     #shallow    { grid-area: 2 / 5 / span 1 / span 2; }
     #valley     { grid-area: 3 / 3 / span 1 / span 2; }
     #mountain   { grid-area: 3 / 5 / span 1 / span 2; }
-    #terrain-tools { grid-area: 4 / 3 / span 1 / span 4; display: flex; flex-direction: column; gap: 4px; }
-    #terrain-tools .terrain-label { font-size: 66%; }
-    #terrain-tools .terrain-row { display: flex; gap: 4px; align-items: center; }
+    #terrain-tools { grid-area: 4 / 3 / span 1 / span 4; display: flex; align-items: center; gap: 10px; overflow: hidden; }
+    #terrain-tools .terrain-label { font-size: 66%; white-space: nowrap; }
+    #terrain-tools .terrain-row { display: flex; gap: 4px; align-items: center; white-space: nowrap; }
     #terrain-tools .terrain-row button { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%; }
     #terrain-tools .terrain-row span { font-size: 66%; }
     #terrain-tools button.current-control { outline: 3px solid hsl(220, 50%, 50%); }

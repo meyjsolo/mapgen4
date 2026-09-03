@@ -19,7 +19,7 @@ import {
     CITY_NONE, CITY_WATER, CITY_PARK, CITY_RESIDENTIAL, CITY_COMMERCIAL, cityPalette,
     OBJ_NONE, OBJ_ROAD, OBJ_BUILDING, OBJ_TREE,
 } from "./city.ts";
-import {TERRAIN_NONE, TERRAIN_SNOW, NUM_TERRAINS} from "./terrains.ts";
+import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, NUM_TERRAINS} from "./terrains.ts";
 
 const CANVAS_SIZE = 128;
 
@@ -407,11 +407,14 @@ for (let t of CITY_OBJECT_TOOLS) {
     cityToolbar.appendChild(row);
 }
 
-/* Terrain brushes: paint an explicit terrain type (snow, ...) over the
- * wild map, overriding the automatic biome colors. Snow also raises the
- * elevation (like the mountain brush) so it gets real mountain relief. */
+/* Terrain brushes: paint an explicit terrain type (snow, grass, ...)
+ * over the wild map, overriding the automatic biome colors. Snow also
+ * raises the elevation (like the mountain brush) so it gets real
+ * mountain relief; grass keeps the land low and flat (like the valley
+ * brush). */
 const TERRAIN_TOOLS = [
-    {key: 'snow', label: 'snow', color: 'hsl(210, 30%, 92%)', type: TERRAIN_SNOW, elevation: +1.0},
+    {key: 'snow',  label: 'snow',  color: 'hsl(210, 30%, 92%)', type: TERRAIN_SNOW,  elevation: +1.0},
+    {key: 'grass', label: 'grass', color: 'hsl(110, 40%, 55%)', type: TERRAIN_GRASS, elevation: +0.05},
 ];
 const TERRAIN_TOOL_KEYS = TERRAIN_TOOLS.map(t => t.key);
 const terrainToolbar = document.getElementById('terrain-tools');
@@ -597,6 +600,9 @@ function setUpPaintEventHandling() {
                 g().paintCityAt(CITY_TOOLS[currentTool], coords[0], coords[1], brushSize.outerRadius);
             }
         } else {
+            // Original terrain brushes also clear any explicit terrain
+            // type (snow/grass) so their colors cover the painted area.
+            g().paintTerrainAt(TERRAIN_NONE, coords[0], coords[1], brushSize.outerRadius);
             g().paintAt(TOOLS[currentTool], coords[0], coords[1],
                         brushSize, nowMs - timestamp);
         }
