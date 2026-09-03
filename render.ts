@@ -10,6 +10,7 @@ import {vec2, vec4, mat4} from 'gl-matrix';
 import colormap from "./colormap.ts";
 import Geometry from "./geometry.ts";
 import {NUM_COUNTRIES, countryPalette} from "./countries.ts";
+import {NUM_CITY_ZONES, cityPalette as cityColors} from "./city.ts";
 import type {Mesh} from "./types.d.ts";
 
 //////////////////////////////////////////////////////////////////////
@@ -331,18 +332,22 @@ const vert_drape = `
     in vec2 a_xy;
     in vec2 a_em;
     in float a_country;
+    in float a_zone;
     out vec2 v_em, v_uv, v_xy;
     out float v_z;
     out float v_country;
+    out float v_zone;
     void main() {
         v_em = a_em;
         v_country = a_country;
+        v_zone = a_zone;
         vec2 xy_clamped = clamp(a_xy, vec2(0, 0), vec2(1000, 1000));
         v_z = max(0.0, a_em.x); // oceans with e<0 still rendered at z=0
         if (xy_clamped != a_xy) { // boundary points
             v_z = -0.5;
             v_em = vec2(0.0, 0.0);
             v_country = -1.0;
+            v_zone = -1.0;
         }
         vec4 pos = vec4(u_projection * vec4(xy_clamped, v_z, 1));
         v_uv = a_xy / 1000.0;
@@ -357,17 +362,21 @@ const frag_drape = `
     uniform sampler2D u_water;
     uniform sampler2D u_depth;
     uniform sampler2D u_border;
+    uniform sampler2D u_road;
     uniform vec2 u_light_angle, u_inverse_texture_size;
     uniform float u_slope, u_flat,
                   u_ambient, u_overhead,
                   u_outline_strength, u_outline_coast, u_outline_water,
                   u_outline_depth, u_outline_threshold,
                   u_biome_colors,
-                  u_country_strength, u_country_borders;
+                  u_country_strength, u_country_borders,
+                  u_city_mode, u_road_strength;
     uniform vec3 u_countrypalette[8];
+    uniform vec3 u_citypalette[4];
     in vec2 v_uv, v_xy, v_em;
     in float v_z;
     in float v_country;
+    in float v_zone;
     out vec4 out_fragcolor;
 
     const vec3 neutral_land_biome = vec3(0.9, 0.8, 0.7);
@@ -434,6 +443,12 @@ const frag_drape = `
         );
         if (z <= 0.5 && max(depth1, depth2) > 1.0/256.0 && neighboring_river <= 0.2) { outline += u_outline_coast * 256.0 * (max(depth1, depth2) - 2.0*(z - 0.5)); }
 
+        // City mode: replace the biome color with the zone color.
+        if (u_city_mode > 0.5 && v_zone >= 0.0) {
+            int zi = int(clamp(floor(v_zone + 0.5), 0.0, 3.0));
+            biome_color = u_citypalette[zi];
+        }
+
         // Tint land with the country color and draw dark national borders
         if (v_em.x >= 0.0 && v_country >= 0.0) {
             int slot = int(clamp(floor(v_country + 0.5), 0.0, 7.0));
@@ -442,6 +457,12 @@ const frag_drape = `
         }
         float border = texture(u_border, pos).a;
         biome_color *= mix(1.0, 1.0 - 0.9 * border, u_country_borders);
+
+        // City roads: draw asphalt over developable ground in city mode
+        if (u_city_mode > 0.5) {
+            float road = texture(u_road, pos).a;
+            biome_color = mix(biome_color, vec3(0.10, 0.10, 0.11), u_road_strength * 0.92 * road);
+        }
 
         out_fragcolor = vec4(mix(biome_color, water_color.rgb, water_color.a) * light / outline, 1);
     }`;
@@ -480,6 +501,32 @@ const frag_border = `
         out_fragcolor = vec4(0, 0, 0, 1);
     }`;
 
+const frag_road = `
+    precision mediump float;
+    out vec4 out_fragcolor;
+    void main() {
+        out_fragcolor = vec4(0.13, 0.13, 0.14, 1); // asphalt
+    }`;
+
+const vert_building = `
+    precision highp float;
+    uniform mat4 u_projection;
+    in vec3 a_xyz;
+    in vec3 a_color;
+    out vec3 v_color;
+    void main() {
+        v_color = a_color;
+        gl_Position = u_projection * vec4(a_xyz, 1);
+    }`;
+
+const frag_building = `
+    precision mediump float;
+    in vec3 v_color;
+    out vec4 out_fragcolor;
+    void main() {
+        out_fragcolor = vec4(v_color, 1);
+    }`;
+
 //////////////////////////////////////////////////////////////////////
 // Mapgen4 renderer
 
@@ -488,6 +535,10 @@ const fbo_texture_size: number = 2048;
 export default class Renderer {
     numRiverTriangles: number = 0;
     numBorderSegments: number = 0;
+    numRoadSegments: number = 0;
+    numBuildings: number = 0;
+    numTrees: number = 0;
+    treeDensity: number = 1;
 
     mesh: Mesh;
     topdown: mat4;
@@ -500,7 +551,11 @@ export default class Renderer {
     quad_elements: Int32Array;
     a_river_xyww: Float32Array;
     a_border_xy: Float32Array;
+    a_road_xy: Float32Array;
+    a_buildings: Float32Array;
+    a_trees: Float32Array;
     countryPalette: Float32Array;
+    cityPalette: Float32Array;
 
     countryNames: string[];
     countrySumX: Float32Array;
@@ -523,6 +578,7 @@ export default class Renderer {
     fbo_depth: Framebuffer;
     fbo_drape: Framebuffer;
     fbo_border: Framebuffer;
+    fbo_road: Framebuffer;
 
     program_river: Program;
     program_land: Program;
@@ -530,6 +586,9 @@ export default class Renderer {
     program_drape: Program;
     program_final: Program;
     program_border: Program;
+    program_road: Program;
+    program_building: Program;
+    program_tree: Program;
 
     buffer_fullscreen: Buffer;
     buffer_quad_xy: Buffer;
@@ -537,6 +596,9 @@ export default class Renderer {
     buffer_quad_elements: Buffer;
     buffer_river_xyww: Buffer;
     buffer_border_xy: Buffer;
+    buffer_road_xy: Buffer;
+    buffer_buildings: Buffer;
+    buffer_trees: Buffer;
 
     constructor (mesh: Mesh) {
         const canvas = document.getElementById('mapgen4') as HTMLCanvasElement;
@@ -553,7 +615,9 @@ export default class Renderer {
         this.inverse_projection = mat4.create();
 
         this.a_quad_xy = new Float32Array(2 * (mesh.numRegions + mesh.numTriangles));
-        this.a_quad_em = new Float32Array(3 * (mesh.numRegions + mesh.numTriangles));
+        /* per-vertex layout: elevation, rainfall, country id, city zone,
+         * object mask */
+        this.a_quad_em = new Float32Array(5 * (mesh.numRegions + mesh.numTriangles));
         this.quad_elements_length = 3 * mesh.numSolidSides;
         this.quad_elements = new Int32Array(this.quad_elements_length);
         /* NOTE: The maximum number of river triangles will be when
@@ -566,12 +630,24 @@ export default class Renderer {
         /* each border segment is 6 vertices of 2 floats, at most one
          * segment per solid side */
         this.a_border_xy = new Float32Array(12 * mesh.numSolidSides);
+        this.a_road_xy = new Float32Array(12 * mesh.numSolidSides);
+        /* each building is 30 vertices of 6 floats (x, y, z, r, g, b) */
+        this.a_buildings = new Float32Array(180 * mesh.numSolidRegions);
+        /* each tree is 18 vertices of 6 floats (x, y, z, r, g, b) */
+        this.a_trees = new Float32Array(108 * mesh.numSolidRegions);
         this.countryPalette = new Float32Array(3 * NUM_COUNTRIES);
         for (let i = 0; i < NUM_COUNTRIES; i++) {
             let [r, g, b] = countryPalette[i];
             this.countryPalette[3*i] = r;
             this.countryPalette[3*i+1] = g;
             this.countryPalette[3*i+2] = b;
+        }
+        this.cityPalette = new Float32Array(3 * NUM_CITY_ZONES);
+        for (let i = 0; i < NUM_CITY_ZONES; i++) {
+            let [r, g, b] = cityColors[i];
+            this.cityPalette[3*i] = r;
+            this.cityPalette[3*i+1] = g;
+            this.cityPalette[3*i+2] = b;
         }
 
         Geometry.setMeshGeometry(mesh, this.a_quad_xy);
@@ -583,6 +659,9 @@ export default class Renderer {
         this.buffer_fullscreen = this.webgl.createBuffer({update: 'static', data: new Float32Array([-2, 0, 0, -2, 2, 2])});
         this.buffer_river_xyww = this.webgl.createBuffer({update: 'dynamic', data: this.a_river_xyww});
         this.buffer_border_xy = this.webgl.createBuffer({update: 'dynamic', data: this.a_border_xy});
+        this.buffer_road_xy = this.webgl.createBuffer({update: 'dynamic', data: this.a_road_xy});
+        this.buffer_buildings = this.webgl.createBuffer({update: 'dynamic', data: this.a_buildings});
+        this.buffer_trees = this.webgl.createBuffer({update: 'dynamic', data: this.a_trees});
 
         this.texture_colormap = this.webgl.createTexture({data: colormap.data, width: colormap.width, height: colormap.height, filter: 'nearest'});
 
@@ -591,24 +670,26 @@ export default class Renderer {
         this.fbo_river = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, filter: 'linear'}); // linear makes rivers look better
         this.fbo_drape = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: true, filter: 'linear'}); // linear to smooth out edges
         this.fbo_border = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, filter: 'linear'});
+        this.fbo_road = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, filter: 'linear'});
 
         this.program_river = this.webgl.createProgram('river', vert_river, frag_river, (gl, program) => {
             this.buffer_river_xyww.vertexAttribPointer(program.a_xyww, 4, gl.FLOAT, false, 0, 0);
         });
         this.program_land  = this.webgl.createProgram('land', vert_land,  frag_land, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 12, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 20, 0);
             this.buffer_quad_elements.bind();
         });
         this.program_depth = this.webgl.createProgram('depth', vert_depth, frag_depth, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 12, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 20, 0);
             this.buffer_quad_elements.bind();
         });
         this.program_drape = this.webgl.createProgram('drape', vert_drape, frag_drape, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 12, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_country, 1, gl.FLOAT, false, 12, 8);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 20, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_country, 1, gl.FLOAT, false, 20, 8);
+            this.buffer_quad_em.vertexAttribPointer(program.a_zone, 1, gl.FLOAT, false, 20, 12);
             this.buffer_quad_elements.bind();
         });
         this.program_final = this.webgl.createProgram('final', vert_final, frag_final, (gl, program) => {
@@ -616,6 +697,17 @@ export default class Renderer {
         });
         this.program_border = this.webgl.createProgram('border', vert_border, frag_border, (gl, program) => {
             this.buffer_border_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
+        });
+        this.program_road = this.webgl.createProgram('road', vert_border, frag_road, (gl, program) => {
+            this.buffer_road_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
+        });
+        this.program_building = this.webgl.createProgram('building', vert_building, frag_building, (gl, program) => {
+            this.buffer_buildings.vertexAttribPointer(program.a_xyz, 3, gl.FLOAT, false, 24, 0);
+            this.buffer_buildings.vertexAttribPointer(program.a_color, 3, gl.FLOAT, false, 24, 12);
+        });
+        this.program_tree = this.webgl.createProgram('tree', vert_building, frag_building, (gl, program) => {
+            this.buffer_trees.vertexAttribPointer(program.a_xyz, 3, gl.FLOAT, false, 24, 0);
+            this.buffer_trees.vertexAttribPointer(program.a_color, 3, gl.FLOAT, false, 24, 12);
         });
 
         this.screenshotCanvas = document.createElement('canvas');
@@ -672,6 +764,13 @@ export default class Renderer {
 
         this.numBorderSegments = Geometry.setBorderGeometry(this.mesh, this.a_quad_em, this.a_border_xy);
         this.buffer_border_xy.subdata(0, this.a_border_xy.subarray(0, 12 * this.numBorderSegments));
+
+        this.numRoadSegments = Geometry.setRoadGeometry(this.mesh, this.a_quad_em, this.a_road_xy);
+        this.buffer_road_xy.subdata(0, this.a_road_xy.subarray(0, 12 * this.numRoadSegments));
+
+        this.numBuildings = Geometry.setBuildingGeometry(this.mesh, this.a_quad_em, this.a_buildings);
+        this.buffer_buildings.subdata(0, this.a_buildings.subarray(0, 180 * this.numBuildings));
+        this.updateTrees();
         this.computeCountryCenters();
     }
 
@@ -683,7 +782,7 @@ export default class Renderer {
         const counts = new Int32Array(NUM_COUNTRIES);
         const {mesh} = this;
         for (let r = 0; r < mesh.numSolidRegions; r++) {
-            const c = this.a_quad_em[3*r + 2];
+            const c = this.a_quad_em[5*r + 2];
             if (c >= 0 && c < NUM_COUNTRIES) {
                 counts[c]++;
                 this.countrySumX[c] += mesh.x_of_r(r);
@@ -789,6 +888,44 @@ export default class Renderer {
         });
     }
 
+    drawRoads() {
+        this.drawGeneric(this.program_road, this.fbo_road, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.topdown);
+
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            gl.blendEquation(gl.FUNC_ADD);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6 * this.numRoadSegments);
+        });
+    }
+
+    /* Draw 3D building boxes into the drape framebuffer after the
+     * terrain, using the same projection + depth so they sit on the
+     * ground and occlude each other correctly. */
+    drawBuildings() {
+        this.drawGeneric(this.program_building, this.fbo_drape, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 30 * this.numBuildings);
+        });
+    }
+
+    drawTrees() {
+        this.drawGeneric(this.program_tree, this.fbo_drape, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 18 * this.numTrees);
+        });
+    }
+
+    /* Regenerate the tree geometry (used when the map changes and when
+     * the tree_density slider moves). */
+    updateTrees() {
+        this.numTrees = Geometry.setTreeGeometry(this.mesh, this.a_quad_em, this.a_trees, this.treeDensity);
+        this.buffer_trees.subdata(0, this.a_trees.subarray(0, 108 * this.numTrees));
+    }
+
     drawLand(outline_water: number) {
         this.drawGeneric(this.program_land, this.fbo_land, (gl, program) => {
             gl.uniformMatrix4fv(program.u_projection, false, this.topdown);
@@ -825,16 +962,21 @@ export default class Renderer {
             gl.uniform1f(program.u_biome_colors, renderParam.biome_colors);
             gl.uniform1f(program.u_country_strength, renderParam.country_strength);
             gl.uniform1f(program.u_country_borders, renderParam.country_borders);
+            gl.uniform1f(program.u_city_mode, renderParam.city_mode ?? 0);
+            gl.uniform1f(program.u_road_strength, renderParam.road_strength ?? 0);
 
             /* uniform arrays are reflected as "u_countrypalette[0]" */
             const u_countrypalette = program['u_countrypalette[0]'] ?? program.u_countrypalette;
             if (u_countrypalette) gl.uniform3fv(u_countrypalette, this.countryPalette);
+            const u_citypalette = program['u_citypalette[0]'] ?? program.u_citypalette;
+            if (u_citypalette) gl.uniform3fv(u_citypalette, this.cityPalette);
 
             this.texture_colormap.activate(gl.TEXTURE0, program.u_colormap);
             this.fbo_land.texture.activate(gl.TEXTURE1, program.u_elevation);
             this.fbo_river.texture.activate(gl.TEXTURE2, program.u_water);
             this.fbo_depth.texture.activate(gl.TEXTURE3, program.u_depth);
             this.fbo_border.texture.activate(gl.TEXTURE4, program.u_border);
+            this.fbo_road.texture.activate(gl.TEXTURE5, program.u_road);
 
             gl.drawElements(gl.TRIANGLES, this.quad_elements_length, gl.UNSIGNED_INT, 0);
         });
@@ -857,6 +999,7 @@ export default class Renderer {
             this.fbo_depth.clear(0, 0, 0, 1);
             this.fbo_drape.clear(0.3, 0.3, 0.35, 1);
             this.fbo_border.clear(0, 0, 0, 0);
+            this.fbo_road.clear(0, 0, 0, 0);
             gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         };
 
@@ -904,7 +1047,19 @@ export default class Renderer {
                 this.drawBorders();
             }
 
+            if (this.numRoadSegments > 0) {
+                this.drawRoads();
+            }
+
             this.drawDrape(renderParam);
+
+            if (this.numBuildings > 0 && renderParam.city_mode > 0) {
+                this.drawBuildings();
+            }
+
+            if (this.numTrees > 0 && renderParam.city_mode > 0) {
+                this.drawTrees();
+            }
 
             /* Draw the final texture to the canvas; this slightly blurs the outlines */
             this.drawFinal([0.5 / fbo_texture_size, 0.5 / fbo_texture_size]);
@@ -937,5 +1092,11 @@ export default class Renderer {
 
     updateView(renderParam: any) {
         this.renderParam = renderParam;
+        /* the tree density slider only redraws; rebuild the tree
+         * geometry when it changes */
+        if (renderParam && this.treeDensity !== (renderParam.tree_density ?? 1)) {
+            this.treeDensity = renderParam.tree_density ?? 1;
+            this.updateTrees();
+        }
     }
 }

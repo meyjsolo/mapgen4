@@ -12,6 +12,10 @@ import FlatQueue from 'flatqueue';
 import {makeRandFloat} from '@redblobgames/prng';
 import {clamp} from "./geometry.ts";
 import {NUM_COUNTRIES} from "./countries.ts";
+import {
+    CITY_NONE, CITY_WATER, CITY_PARK, CITY_RESIDENTIAL, CITY_COMMERCIAL, NUM_CITY_ZONES,
+    OBJ_NONE,
+} from "./city.ts";
 import type {Mesh} from "./types.d.ts";
 
 type PrecalculatedNoise = {
@@ -27,6 +31,12 @@ type PrecalculatedNoise = {
 const mountain = {
     slope: 16,
 };
+
+/** Deterministic 0..1 hash from a 2D position. */
+function hash01(x: number, y: number): number {
+    const h = Math.sin(x * 127.1 + y * 311.7);
+    return h - Math.floor(h);
+}
 
 /**
  * Mountains are peaks surrounded by steep dropoffs. In the point
@@ -101,6 +111,10 @@ export default class Map {
     mountain_distance_t: Float32Array;
     country_t: Int8Array;
     country_r: Int8Array;
+    city_t: Int8Array;
+    city_r: Int8Array;
+    object_t: Int8Array;
+    object_r: Int8Array;
 
     constructor (public mesh: Mesh, public t_peaks: number[], param: any) {
         this.spacing = param.spacing;
@@ -118,6 +132,10 @@ export default class Map {
         this.mountain_distance_t = new Float32Array(mesh.numTriangles);
         this.country_t           = new Int8Array(mesh.numTriangles);
         this.country_r           = new Int8Array(mesh.numRegions);
+        this.city_t              = new Int8Array(mesh.numTriangles);
+        this.city_r              = new Int8Array(mesh.numRegions);
+        this.object_t            = new Int8Array(mesh.numTriangles);
+        this.object_r            = new Int8Array(mesh.numRegions);
     }
 
     /**
@@ -151,6 +169,93 @@ export default class Map {
                 if (count > bestCount) { bestCount = count; best = c; }
             }
             country_r[r] = best;
+        }
+    }
+
+    /**
+     * Assign city zones from the painted low-res constraint canvas.
+     * Painted cells win; every non-painted region gets an automatic
+     * zone (water along coast/lakes, commercial near the center,
+     * residential around it, park on the outskirts). Must be called
+     * after assignElevation() so auto zones can see elevation_r.
+     */
+    assignCity(cityGrid: Float32Array, size: number) {        let {mesh, city_t, city_r, elevation_r} = this;
+        let {numSolidTriangles} = mesh;
+
+        function autoZone(r: number): number {
+            const x = mesh.x_of_r(r), y = mesh.y_of_r(r);
+            if (elevation_r[r] < 0.0) return CITY_WATER;
+            const d = Math.hypot(x - 500, y - 500) / 500;
+            const n = hash01(x, y);
+            if (d < 0.12 + 0.06 * n) return CITY_COMMERCIAL;
+            if (d < 0.38 + 0.16 * n) return CITY_RESIDENTIAL;
+            return CITY_PARK;
+        }
+
+        for (let t = 0; t < numSolidTriangles; t++) {
+            let x = mesh.x_of_t(t) / 1000, y = mesh.y_of_t(t) / 1000;
+            let xi = clamp((x * size) | 0, 0, size - 1),
+                yi = clamp((y * size) | 0, 0, size - 1);
+            city_t[t] = cityGrid[yi * size + xi];
+        }
+
+        let votes = new Int32Array(NUM_CITY_ZONES);
+        const t_around_r: number[] = [];
+        for (let r = 0; r < mesh.numRegions; r++) {
+            city_r[r] = CITY_NONE;
+            if (mesh.is_ghost_r(r)) continue;
+            votes.fill(0);
+            mesh.t_around_r(r, t_around_r);
+            let best = -1, bestCount = 0;
+            for (let t of t_around_r) {
+                if (t >= numSolidTriangles) continue;
+                let c = city_t[t];
+                if (c < CITY_WATER || c >= NUM_CITY_ZONES) continue;
+                let count = ++votes[c];
+                if (count > bestCount) { bestCount = count; best = c; }
+            }
+            city_r[r] = best >= 0 ? best : autoZone(r);
+        }
+
+        // Fill in unpainted triangles with the majority zone of their
+        // three corner regions so zone colors stay flat per block.
+        const r_around_t: number[] = [];
+        let bestZone = -1, bestZoneCount = 0;
+        for (let t = 0; t < numSolidTriangles; t++) {
+            if (city_t[t] >= CITY_WATER) continue;
+            votes.fill(0);
+            bestZone = -1; bestZoneCount = 0;
+            mesh.r_around_t(t, r_around_t);
+            for (let r of r_around_t) {
+                const c = city_r[r];
+                if (c < CITY_WATER) continue;
+                const count = ++votes[c];
+                if (count > bestZoneCount) { bestZoneCount = count; bestZone = c; }
+            }
+            city_t[t] = bestZone >= 0 ? bestZone : CITY_PARK;
+        }
+    }
+
+    /**
+     * Assign the painted object layer (road/building/tree bitmask or
+     * -1 for erase) by sampling the constraint canvas at each region
+     * and triangle centroid. 0 means "automatic" — the zone decides.
+     */
+    assignObjects(objectGrid: Float32Array, size: number) {
+        let {mesh, object_t, object_r} = this;
+        let {numSolidTriangles} = mesh;
+        for (let t = 0; t < numSolidTriangles; t++) {
+            let x = mesh.x_of_t(t) / 1000, y = mesh.y_of_t(t) / 1000;
+            let xi = clamp((x * size) | 0, 0, size - 1),
+                yi = clamp((y * size) | 0, 0, size - 1);
+            object_t[t] = objectGrid[yi * size + xi];
+        }
+        for (let r = 0; r < mesh.numRegions; r++) {
+            if (mesh.is_ghost_r(r)) { object_r[r] = OBJ_NONE; continue; }
+            let x = mesh.x_of_r(r) / 1000, y = mesh.y_of_r(r) / 1000;
+            let xi = clamp((x * size) | 0, 0, size - 1),
+                yi = clamp((y * size) | 0, 0, size - 1);
+            object_r[r] = objectGrid[yi * size + xi];
         }
     }
 

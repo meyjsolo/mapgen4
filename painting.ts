@@ -15,6 +15,10 @@
 import {createNoise2D} from 'simplex-noise';
 import {makeRandFloat} from '@redblobgames/prng';
 import {NUM_COUNTRIES, countryPalette} from "./countries.ts";
+import {
+    CITY_NONE, CITY_WATER, CITY_PARK, CITY_RESIDENTIAL, CITY_COMMERCIAL, cityPalette,
+    OBJ_NONE, OBJ_ROAD, OBJ_BUILDING, OBJ_TREE,
+} from "./city.ts";
 
 const CANVAS_SIZE = 128;
 
@@ -36,11 +40,19 @@ class Generator {
     elevation: Float32Array;
     country: Float32Array;
     countryHasPainted = false;
+    city: Float32Array;
+    cityHasPainted = false;
+    objects: Float32Array;
+    objectsHasPainted = false;
     
     constructor () {
         this.elevation = new Float32Array(CANVAS_SIZE * CANVAS_SIZE);
         // -1 means "no country"; otherwise a country palette index
         this.country = new Float32Array(CANVAS_SIZE * CANVAS_SIZE).fill(-1);
+        // -1 means "not painted"; otherwise a city zone index
+        this.city = new Float32Array(CANVAS_SIZE * CANVAS_SIZE).fill(-1);
+        // 0 = automatic, -1 = erased, otherwise an object bitmask
+        this.objects = new Float32Array(CANVAS_SIZE * CANVAS_SIZE).fill(0);
     }
 
     setElevationParam(elevationParam) {
@@ -94,6 +106,10 @@ class Generator {
         this.userHasPainted = false;
         this.country.fill(-1);
         this.countryHasPainted = false;
+        this.city.fill(-1);
+        this.cityHasPainted = false;
+        this.objects.fill(0);
+        this.objectsHasPainted = false;
     }
 
     /**
@@ -155,28 +171,112 @@ class Generator {
 
         this.countryHasPainted = true;
     }
-}
-let heightMap = new Generator();
 
-/* country names, one per palette slot, shown on the map when painted */
-const countryNames: string[] = Array.from({length: NUM_COUNTRIES}, () => '');
+    /**
+     * Stamp a city zone onto a constant-filled disc. x0, y0 should be
+     * 0 to 1; radius is the brush size in canvas texels.
+     */
+    paintCityAt(zone: number, x0: number, y0: number, outerRadius: number) {
+        let {city} = this;
+        let xc = (x0 * CANVAS_SIZE) | 0, yc = (y0 * CANVAS_SIZE) | 0;
+        let top = Math.ceil(Math.max(0, yc - outerRadius)),
+            bottom = Math.floor(Math.min(CANVAS_SIZE-1, yc + outerRadius));
+        for (let y = top; y <= bottom; y++) {
+            let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
+            let left = Math.max(0, xc - s),
+                right = Math.min(CANVAS_SIZE-1, xc + s);
+            for (let x = left; x <= right; x++) {
+                city[y * CANVAS_SIZE + x] = zone;
+            }
+        }
+
+        this.cityHasPainted = true;
+    }
+
+    /**
+     * Stamp a forced object bit (road/building/tree) onto a disc.
+     * Painted objects override the automatic zone-based placement.
+     * The object's forbidden bit is cleared so it can appear again.
+     */
+    paintObjectAt(mask: number, x0: number, y0: number, outerRadius: number) {
+        let {objects} = this;
+        let xc = (x0 * CANVAS_SIZE) | 0, yc = (y0 * CANVAS_SIZE) | 0;
+        let top = Math.ceil(Math.max(0, yc - outerRadius)),
+            bottom = Math.floor(Math.min(CANVAS_SIZE-1, yc + outerRadius));
+        for (let y = top; y <= bottom; y++) {
+            let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
+            let left = Math.max(0, xc - s),
+                right = Math.min(CANVAS_SIZE-1, xc + s);
+            for (let x = left; x <= right; x++) {
+                let v = objects[y * CANVAS_SIZE + x];
+                let forbidden = (v >> 4) & 0xF;
+                let forced = (v & 0xF) | mask;
+                objects[y * CANVAS_SIZE + x] = ((forbidden & ~mask) << 4) | forced;
+            }
+        }
+
+        this.objectsHasPainted = true;
+    }
+
+    /**
+     * Stamp a forbidden object bit onto a disc: the object is removed
+     * and will not reappear automatically.
+     */
+    eraseObjectAt(mask: number, x0: number, y0: number, outerRadius: number) {
+        let {objects} = this;
+        let xc = (x0 * CANVAS_SIZE) | 0, yc = (y0 * CANVAS_SIZE) | 0;
+        let top = Math.ceil(Math.max(0, yc - outerRadius)),
+            bottom = Math.floor(Math.min(CANVAS_SIZE-1, yc + outerRadius));
+        for (let y = top; y <= bottom; y++) {
+            let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
+            let left = Math.max(0, xc - s),
+                right = Math.min(CANVAS_SIZE-1, xc + s);
+            for (let x = left; x <= right; x++) {
+                let v = objects[y * CANVAS_SIZE + x];
+                let forbidden = ((v >> 4) & 0xF) | mask;
+                let forced = (v & 0xF) & ~mask;
+                objects[y * CANVAS_SIZE + x] = (forbidden << 4) | forced;
+            }
+        }
+
+        this.objectsHasPainted = true;
+    }
+}
+
+/* Each scene (wild / city) is a completely independent map: its own
+ * constraint canvases and country names. The active scene's generator
+ * is what painting/exported operate on. */
+type SceneName = 'wild' | 'city';
+const scenes: { [scene in SceneName]: { gen: Generator; names: string[] } } = {
+    wild: { gen: new Generator(), names: Array.from({length: NUM_COUNTRIES}, () => '') },
+    city: { gen: new Generator(), names: Array.from({length: NUM_COUNTRIES}, () => '') },
+};
+let activeScene: SceneName = 'wild';
+const g = () => scenes[activeScene].gen;
+const sceneNames = () => scenes[activeScene].names;
 
 let exported = {
     size: CANVAS_SIZE,
     onUpdate: () => {},
     screenToWorldCoords: coords => coords,
-    constraints: heightMap.elevation,
-    country: heightMap.country,
-    countryNames,
-    setElevationParam: elevationParam => heightMap.setElevationParam(elevationParam),
-    userHasPainted: () => heightMap.userHasPainted,
-    countryHasPainted: () => heightMap.countryHasPainted,
+    setElevationParam: elevationParam => g().setElevationParam(elevationParam),
+    userHasPainted: () => g().userHasPainted,
+    countryHasPainted: () => g().countryHasPainted,
+    cityHasPainted: () => g().cityHasPainted,
+    objectsHasPainted: () => g().objectsHasPainted,
+    setScene: (scene: SceneName) => { setScene(scene); },
 };
+/* The active scene's constraint arrays are exposed as live getters. */
+Object.defineProperty(exported, 'constraints', { get: () => g().elevation });
+Object.defineProperty(exported, 'country', { get: () => g().country });
+Object.defineProperty(exported, 'city', { get: () => g().city });
+Object.defineProperty(exported, 'objects', { get: () => g().objects });
+Object.defineProperty(exported, 'countryNames', { get: () => sceneNames() });
 
 document.getElementById('button-reset').addEventListener('click', () => {
-    heightMap.generate();
+    g().generate();
     for (let i = 0; i < NUM_COUNTRIES; i++) {
-        countryNames[i] = '';
+        sceneNames()[i] = '';
         const input = document.getElementById(`country-name-${i}`) as HTMLInputElement;
         if (input) { input.value = ''; }
     }
@@ -211,7 +311,7 @@ for (let i = 0; i < NUM_COUNTRIES; i++) {
     input.setAttribute('type', 'text');
     input.setAttribute('placeholder', 'name');
     input.addEventListener('input', () => {
-        countryNames[i] = input.value;
+        sceneNames()[i] = input.value;
         exported.onUpdate();
     });
 
@@ -236,6 +336,76 @@ const TOOLS = {
     mountain: {elevation: +1.0},
 };
 
+/* In city mode the four terrain tools are reinterpreted as zone
+ * brushes; the tool buttons are recolored to match. */
+const CITY_TOOLS = {
+    ocean:    CITY_WATER,
+    shallow:  CITY_PARK,
+    valley:   CITY_RESIDENTIAL,
+    mountain: CITY_COMMERCIAL,
+};
+
+const TOOL_BUTTONS = ['ocean', 'shallow', 'valley', 'mountain'];
+const TOOL_SVG_OPACITY = '0.25';
+
+/* City object brushes: paint/erase roads, buildings and trees. Only
+ * usable in the city scene; painting an object overrides the automatic
+ * zone-based placement, erase forbids it. */
+const CITY_OBJECT_TOOLS = [
+    {key: 'road',     label: 'road',     color: 'hsl(0, 0%, 28%)'},
+    {key: 'building', label: 'building', color: 'hsl(35, 40%, 46%)'},
+    {key: 'tree',     label: 'tree',     color: 'hsl(120, 35%, 34%)'},
+    {key: 'erase',    label: 'erase',    color: 'hsl(0, 0%, 88%)'},
+];
+const CITY_TOOL_KEYS = CITY_OBJECT_TOOLS.map(t => t.key);
+const cityToolbar = document.getElementById('city-tools');
+for (let t of CITY_OBJECT_TOOLS) {
+    const row = document.createElement('div');
+    row.setAttribute('class', 'city-tool-row');
+    const btn = document.createElement('button');
+    btn.setAttribute('id', `city-tool-${t.key}`);
+    btn.style.background = t.color;
+    btn.setAttribute('title', t.label);
+    btn.addEventListener('click', () => {
+        currentTool = t.key;
+        displayCurrentTool();
+    });
+    const span = document.createElement('span');
+    span.appendChild(document.createTextNode(t.label));
+    row.appendChild(btn);
+    row.appendChild(span);
+    cityToolbar.appendChild(row);
+}
+
+function setScene(scene: SceneName) {
+    activeScene = scene;
+    /* countries row and city object tools share the same panel */
+    document.getElementById('countries').style.display = scene === 'city' ? 'none' : '';
+    document.getElementById('city-tools').style.display = scene === 'city' ? 'flex' : 'none';
+    if (scene === 'wild' && CITY_TOOL_KEYS.includes(currentTool)) {
+        currentTool = 'mountain';
+    }
+    for (const name of TOOL_BUTTONS) {
+        const btn = document.getElementById(name) as HTMLButtonElement;
+        if (!btn) continue;
+        const svg = btn.querySelector('svg') as SVGSVGElement;
+        if (scene === 'city') {
+            const [r, g, b] = cityPalette[CITY_TOOLS[name]];
+            btn.style.background = `rgb(${255*r|0},${255*g|0},${255*b|0})`;
+            if (svg) svg.style.opacity = TOOL_SVG_OPACITY;
+        } else {
+            btn.style.background = '';
+            if (svg) svg.style.opacity = '';
+        }
+    }
+    /* show the active scene's country names in the inputs */
+    for (let i = 0; i < NUM_COUNTRIES; i++) {
+        const input = document.getElementById(`country-name-${i}`) as HTMLInputElement;
+        if (input) { input.value = scenes[activeScene].names[i]; }
+    }
+    displayCurrentTool();
+}
+
 let currentTool = 'mountain';
 let currentSize = 'small';
 
@@ -245,7 +415,8 @@ function displayCurrentTool() {
         c.classList.remove(className);
     }
     if (currentTool !== 'country') {
-        document.getElementById(currentTool).classList.add(className);
+        const id = CITY_TOOL_KEYS.includes(currentTool) ? `city-tool-${currentTool}` : currentTool;
+        document.getElementById(id).classList.add(className);
     }
     document.getElementById(currentSize).classList.add(className);
     if (currentTool === 'country') {
@@ -262,6 +433,10 @@ const controls: [string, string, () => void][] = [
     ['w', "shallow",  () => { currentTool = 'shallow'; }],
     ['e', "valley",   () => { currentTool = 'valley'; }],
     ['r', "mountain", () => { currentTool = 'mountain'; }],
+    ['a', "road",     () => { currentTool = 'road'; }],
+    ['s', "building", () => { currentTool = 'building'; }],
+    ['d', "tree",     () => { currentTool = 'tree'; }],
+    ['f', "erase",    () => { currentTool = 'erase'; }],
 ];
 
 window.addEventListener('keydown', e => {
@@ -271,7 +446,8 @@ window.addEventListener('keydown', e => {
 });
 
 for (let control of controls) {
-    document.getElementById(control[1]).addEventListener('click', () => { control[2](); displayCurrentTool(); } );
+    const el = document.getElementById(control[1]) ?? document.getElementById(`city-tool-${control[1]}`);
+    if (el) { el.addEventListener('click', () => { control[2](); displayCurrentTool(); }); }
 }
 displayCurrentTool();
 
@@ -289,7 +465,7 @@ function setUpPaintEventHandling() {
         timestamp = Date.now();
         currentStroke.time.fill(0);
         currentStroke.strength.fill(0);
-        currentStroke.previousElevation.set(heightMap.elevation);
+        currentStroke.previousElevation.set(g().elevation);
         move(event);
     }
 
@@ -332,10 +508,24 @@ function setUpPaintEventHandling() {
         if (currentTool === 'country') {
             // Countries stamp the selected country id as a constant
             // disc, so moving the brush edits the border directly.
-            heightMap.paintCountryAt(currentCountry, coords[0], coords[1], brushSize.outerRadius);
+            g().paintCountryAt(currentCountry, coords[0], coords[1], brushSize.outerRadius);
+        } else if (activeScene === 'city') {
+            // City brushes: zone stamps, or paint/erase objects.
+            if (currentTool === 'road') {
+                g().paintObjectAt(OBJ_ROAD, coords[0], coords[1], brushSize.outerRadius);
+            } else if (currentTool === 'building') {
+                g().paintObjectAt(OBJ_BUILDING, coords[0], coords[1], brushSize.outerRadius);
+            } else if (currentTool === 'tree') {
+                g().paintObjectAt(OBJ_TREE, coords[0], coords[1], brushSize.outerRadius);
+            } else if (currentTool === 'erase') {
+                // erase removes all object types in the brush area
+                g().eraseObjectAt(OBJ_ROAD | OBJ_BUILDING | OBJ_TREE, coords[0], coords[1], brushSize.outerRadius);
+            } else {
+                g().paintCityAt(CITY_TOOLS[currentTool], coords[0], coords[1], brushSize.outerRadius);
+            }
         } else {
-            heightMap.paintAt(TOOLS[currentTool], coords[0], coords[1],
-                              brushSize, nowMs - timestamp);
+            g().paintAt(TOOLS[currentTool], coords[0], coords[1],
+                        brushSize, nowMs - timestamp);
         }
         timestamp = nowMs;
         exported.onUpdate();

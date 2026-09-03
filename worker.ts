@@ -20,7 +20,13 @@ let handler = (event) => {
     // reconstruct the full object I call the constructor again
     // and then copy the data over
     const mesh = new TriangleMesh(event.data.mesh as TriangleMesh);
-    const map = new Map(mesh as Mesh, event.data.t_peaks, event.data.param);
+    // The wild and city scenes are completely independent maps; each
+    // keeps its own Map state so switching scenes never leaks terrain
+    // or painting between them.
+    const maps = {
+        wild: new Map(mesh as Mesh, event.data.t_peaks, event.data.param),
+        city: new Map(mesh as Mesh, event.data.t_peaks, event.data.param),
+    };
 
     // TODO: placeholder - calculating elevation+biomes takes 35% of
     // the time on my laptop, and seeing the elevation change is the
@@ -39,7 +45,8 @@ let handler = (event) => {
     
     // This handler is for all subsequent messages
     handler = (event) => {
-        let {param, constraints, quad_elements_buffer, a_quad_em_buffer, a_river_xyww_buffer} = event.data;
+        let {param, constraints, scene, quad_elements_buffer, a_quad_em_buffer, a_river_xyww_buffer} = event.data;
+        const map = maps[scene] ?? maps.wild;
 
         let numRiverTriangles = 0;
         let start_time = performance.now();
@@ -47,6 +54,8 @@ let handler = (event) => {
         if (run.biomes) {
             map.assignCountries(constraints.country, constraints.size);
             map.assignElevation(param.elevation, constraints);
+            map.assignCity(constraints.city, constraints.size);
+            map.assignObjects(constraints.objects, constraints.size);
             map.assignRainfall(param.biomes);
         }
         if (run.rivers) {

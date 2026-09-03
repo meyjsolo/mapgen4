@@ -13,11 +13,21 @@
  * limitations under the License.
  */
 
-import param from "./config.js";
+import baseParam from "./config.js";
 import {makeMesh} from "./mesh.ts";
 import Painting from "./painting.ts";
 import Renderer from "./render.ts";
 import type {Mesh} from "./types.d.ts";
+
+/* The wild and city scenes are two completely independent maps: each
+ * has its own parameters (seed, terrain, ...) and keeps its own state
+ * when switching back and forth. */
+let activeScene: 'wild' | 'city' = 'wild';
+const params = {
+    wild: JSON.parse(JSON.stringify(baseParam)),
+    city: JSON.parse(JSON.stringify(baseParam)),
+};
+function getParam() { return params[activeScene]; }
 
 
 
@@ -64,6 +74,8 @@ const initialParams = {
         ['biome_colors', 1, 0, 1],
         ['country_strength', 0.5, 0, 1],
         ['country_borders', 1.0, 0, 1],
+        ['road_strength', 1.0, 0, 2],
+        ['tree_density', 1.0, 0, 2],
     ],
 };
 
@@ -83,7 +95,8 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
         document.getElementById('sliders').appendChild(container);
         for (let [name, initialValue, min, max] of initialParams[phase]) {
             const step = name === 'seed'? 1 : 0.001;
-            param[phase][name] = initialValue;
+            params.wild[phase][name] = initialValue;
+            params.city[phase][name] = initialValue;
 
             let span = document.createElement('span');
             span.appendChild(document.createTextNode(name));
@@ -94,7 +107,7 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
             slider.setAttribute('max', max);
             slider.setAttribute('step', step.toString());
             slider.addEventListener('input', _event => {
-                param[phase][name] = slider.valueAsNumber;
+                getParam()[phase][name] = slider.valueAsNumber;
                 requestAnimationFrame(() => {
                     if (phase == 'render') { redraw(); }
                     else { generate(); }
@@ -126,9 +139,47 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
             slider.value = initialValue;
         }
     }
+
+    /* The city is its own fresh map: a different seed and a gentler,
+     * flatter terrain so it reads as a city site. */
+    params.city.elevation.seed = 424242;
+    params.city.elevation.island = 0.5;
+    params.city.elevation.hill_height = 0.005;
+    /* buildings should tower over the flat ground, so use a small
+     * vertical scale in the city scene */
+    params.city.render.mountain_height = 4;
+
+    /* scene toggle: switch between the wild world map and the city map */
+    getParam().render.city_mode = 0;
+    const cityContainer = document.createElement('div');
+    cityContainer.setAttribute('id', 'city-mode-row');
+    const cityButton = document.createElement('button');
+    cityButton.setAttribute('id', 'button-city-mode');
+    cityButton.textContent = '切换到城市地图';
+    cityButton.addEventListener('click', () => {
+        activeScene = activeScene === 'wild' ? 'city' : 'wild';
+        getParam().render.city_mode = activeScene === 'city' ? 1 : 0;
+        Painting.setScene(activeScene);
+        cityButton.textContent = activeScene === 'city' ? '切回野外地图' : '切换到城市地图';
+        syncSlidersToScene();
+        generate();
+    });
+    cityContainer.appendChild(cityButton);
+    document.getElementById('sliders').appendChild(cityContainer);
+
+    /* reflect the active scene's parameters in the sliders */
+    function syncSlidersToScene() {
+        const p = getParam();
+        for (let phase of ['elevation', 'biomes', 'rivers', 'render']) {
+            for (let [name] of initialParams[phase]) {
+                const input = document.querySelector(`#slider-${name} input`) as HTMLInputElement;
+                if (input) { input.value = p[phase][name]; }
+            }
+        }
+    }
     
     function redraw() {
-        render.updateView(param.render);
+        render.updateView(getParam().render);
     }
 
     /* Ask render module to copy WebGL into Canvas */
@@ -139,11 +190,11 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
                 // TODO: Firefox doesn't seem to allow a.click() to
                 // download; is it everyone or just my setup?
                 a.href = URL.createObjectURL(blob);
-                a.setAttribute('download', `mapgen4-${param.elevation.seed}.png`);
+                a.setAttribute('download', `${activeScene}-${getParam().elevation.seed}.png`);
                 a.click();
             });
         };
-        render.updateView(param.render);
+        render.updateView(getParam().render);
     }
     
     Painting.screenToWorldCoords = (coords) => {
@@ -189,22 +240,28 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
     function updateUI() {
         let userHasPainted = Painting.userHasPainted();
         let countryHasPainted = Painting.countryHasPainted();
+        let cityHasPainted = Painting.cityHasPainted();
+        let objectsHasPainted = Painting.objectsHasPainted();
         (document.querySelector("#slider-seed input") as HTMLInputElement).disabled = userHasPainted;
         (document.querySelector("#slider-island input") as HTMLInputElement).disabled = userHasPainted;
-        (document.querySelector("#button-reset") as HTMLInputElement).disabled = !(userHasPainted || countryHasPainted);
+        (document.querySelector("#button-reset") as HTMLInputElement).disabled = !(userHasPainted || countryHasPainted || cityHasPainted || objectsHasPainted);
     }
     
     function generate() {
         if (!working) {
             working = true;
-            Painting.setElevationParam(param.elevation);
+            const p = getParam();
+            Painting.setElevationParam(p.elevation);
             updateUI();
             worker.postMessage({
-                param,
+                param: p,
+                scene: activeScene,
                 constraints: {
                     size: Painting.size,
                     constraints: Painting.constraints,
                     country: Painting.country,
+                    city: Painting.city,
+                    objects: Painting.objects,
                 },
                 quad_elements_buffer: render.quad_elements.buffer,
                 a_quad_em_buffer: render.a_quad_em.buffer,
@@ -220,7 +277,7 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
         }
     }
 
-    worker.postMessage({mesh, t_peaks, param});
+    worker.postMessage({mesh, t_peaks, param: getParam()});
     generate();
 
     const downloadButton = document.getElementById('button-download');
