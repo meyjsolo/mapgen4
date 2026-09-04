@@ -335,16 +335,19 @@ const vert_drape = `
     in float a_country;
     in float a_zone;
     in float a_terrain;
+    in float a_terrainweight;
     out vec2 v_em, v_uv, v_xy;
     out float v_z;
     out float v_country;
     out float v_zone;
     out float v_terrain;
+    out float v_terrainweight;
     void main() {
         v_em = a_em;
         v_country = a_country;
         v_zone = a_zone;
         v_terrain = a_terrain;
+        v_terrainweight = a_terrainweight;
         vec2 xy_clamped = clamp(a_xy, vec2(0, 0), vec2(1000, 1000));
         v_z = max(0.0, a_em.x); // oceans with e<0 still rendered at z=0
         if (xy_clamped != a_xy) { // boundary points
@@ -353,6 +356,7 @@ const vert_drape = `
             v_country = -1.0;
             v_zone = -1.0;
             v_terrain = -1.0;
+            v_terrainweight = 0.0;
         }
         vec4 pos = vec4(u_projection * vec4(xy_clamped, v_z, 1));
         v_uv = a_xy / 1000.0;
@@ -384,6 +388,7 @@ const frag_drape = `
     in float v_country;
     in float v_zone;
     in float v_terrain;
+    in float v_terrainweight;
     out vec4 out_fragcolor;
 
     const vec3 neutral_land_biome = vec3(0.9, 0.8, 0.7);
@@ -456,10 +461,14 @@ const frag_drape = `
             biome_color = u_citypalette[zi];
         }
 
-        // Explicit terrain (e.g. snow): override the biome color.
-        if (v_terrain > 0.5) {
-            int ti = int(clamp(floor(v_terrain + 0.5), 0.0, 7.0));
-            biome_color = u_terrainpalette[ti];
+        // Explicit terrain (e.g. snow): blend the biome color into the terrain
+        // palette color. v_terrain is the integer label (0=auto,
+        // 1=snow, 2=grass, 3=forest, 4=desert); v_terrainweight is a
+        // distance-based blend so the edge fades instead of cutting.
+        if (v_terrain > 0.5 && v_terrainweight > 0.001) {
+            int ti = int(clamp(floor(v_terrain + 0.5), 0.0, 4.0));
+            vec3 terrain_color = u_terrainpalette[ti];
+            biome_color = mix(biome_color, terrain_color, v_terrainweight);
         }
 
         // Tint land with the country color and draw dark national borders
@@ -631,7 +640,7 @@ export default class Renderer {
         this.a_quad_xy = new Float32Array(2 * (mesh.numRegions + mesh.numTriangles));
         /* per-vertex layout: elevation, rainfall, country id, city zone,
          * object mask */
-        this.a_quad_em = new Float32Array(6 * (mesh.numRegions + mesh.numTriangles));
+        this.a_quad_em = new Float32Array(7 * (mesh.numRegions + mesh.numTriangles));
         this.quad_elements_length = 3 * mesh.numSolidSides;
         this.quad_elements = new Int32Array(this.quad_elements_length);
         /* NOTE: The maximum number of river triangles will be when
@@ -698,20 +707,21 @@ export default class Renderer {
         });
         this.program_land  = this.webgl.createProgram('land', vert_land,  frag_land, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 24, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 28, 0);
             this.buffer_quad_elements.bind();
         });
         this.program_depth = this.webgl.createProgram('depth', vert_depth, frag_depth, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 24, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 28, 0);
             this.buffer_quad_elements.bind();
         });
         this.program_drape = this.webgl.createProgram('drape', vert_drape, frag_drape, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 24, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_country, 1, gl.FLOAT, false, 24, 8);
-            this.buffer_quad_em.vertexAttribPointer(program.a_zone, 1, gl.FLOAT, false, 24, 12);
-            this.buffer_quad_em.vertexAttribPointer(program.a_terrain, 1, gl.FLOAT, false, 24, 20);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 28, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_country, 1, gl.FLOAT, false, 28, 8);
+            this.buffer_quad_em.vertexAttribPointer(program.a_zone, 1, gl.FLOAT, false, 28, 12);
+            this.buffer_quad_em.vertexAttribPointer(program.a_terrain, 1, gl.FLOAT, false, 28, 20);
+            this.buffer_quad_em.vertexAttribPointer(program.a_terrainweight, 1, gl.FLOAT, false, 28, 24);
             this.buffer_quad_elements.bind();
         });
         this.program_final = this.webgl.createProgram('final', vert_final, frag_final, (gl, program) => {
@@ -804,7 +814,7 @@ export default class Renderer {
         const counts = new Int32Array(NUM_COUNTRIES);
         const {mesh} = this;
         for (let r = 0; r < mesh.numSolidRegions; r++) {
-            const c = this.a_quad_em[6*r + 2];
+            const c = this.a_quad_em[7*r + 2];
             if (c >= 0 && c < NUM_COUNTRIES) {
                 counts[c]++;
                 this.countrySumX[c] += mesh.x_of_r(r);

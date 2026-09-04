@@ -31,11 +31,11 @@ function setMeshGeometry(mesh: Mesh, P: Float32Array) {
  * Fill an indexed buffer with data from the map.
  */
 function setMapGeometry(map: Map, mountain_folds: number, I: Int32Array, P: Float32Array) {
-    let {mesh, flow_s, elevation_r, elevation_t, rainfall_r, country_r, country_t, city_r, city_t, object_r, object_t, terrain_r, terrain_t} = map;
+    let {mesh, flow_s, elevation_r, elevation_t, rainfall_r, country_r, country_t, city_r, city_t, object_r, object_t, terrain_r, terrain_t, terrainWeight_r, terrainWeight_t} = map;
     let {numSolidSides, numRegions, numTriangles, is_boundary_t} = mesh;
 
     if (I.length !== 3 * numSolidSides) { throw "wrong size"; }
-    if (P.length !== 6 * (numRegions + numTriangles)) { throw "wrong size"; }
+    if (P.length !== 7 * (numRegions + numTriangles)) { throw "wrong size"; }
 
     let p = 0;
     for (let r = 0; r < numRegions; r++) {
@@ -45,6 +45,7 @@ function setMapGeometry(map: Map, mountain_folds: number, I: Int32Array, P: Floa
         P[p++] = city_r[r];
         P[p++] = object_r[r];
         P[p++] = terrain_r[r];
+        P[p++] = terrainWeight_r[r];
     }
     for (let t = 0; t < numTriangles; t++) {
         // The quadrilateral's folds can have a lower elevation to
@@ -61,6 +62,7 @@ function setMapGeometry(map: Map, mountain_folds: number, I: Int32Array, P: Floa
         P[p++] = city_t[t];
         P[p++] = object_t[t];
         P[p++] = terrain_t[t];
+        P[p++] = terrainWeight_t[t];
     }
 
     let i = 0;
@@ -121,7 +123,7 @@ function setBorderGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array): num
         if (s2 < 0) continue;
         let r1 = mesh.r_begin_s(s),
             r2 = mesh.r_begin_s(s2);
-        let c1 = a_em[6*r1 + 2], c2 = a_em[6*r2 + 2];
+        let c1 = a_em[7*r1 + 2], c2 = a_em[7*r2 + 2];
         if (c1 < 0 || c2 < 0 || c1 === c2) continue;
 
         let t1 = mesh.t_inner_s(s),
@@ -165,8 +167,8 @@ function setRoadGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array): numbe
         if (s2 < 0) continue;
         let r1 = mesh.r_begin_s(s),
             r2 = mesh.r_begin_s(s2);
-        let z1 = a_em[6*r1 + 3], z2 = a_em[6*r2 + 3];
-        let o1 = a_em[6*r1 + 4], o2 = a_em[6*r2 + 4];
+        let z1 = a_em[7*r1 + 3], z2 = a_em[7*r2 + 3];
+        let o1 = a_em[7*r1 + 4], o2 = a_em[7*r2 + 4];
         if (z1 < 0 || z2 < 0) continue;
         // erase forbids the road, painted road forces it, otherwise
         // fall back to the automatic developable-zone placement
@@ -220,13 +222,13 @@ function setBuildingGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array): n
     let count = 0;
     const t_around: number[] = [];
     for (let r = 0; r < numSolidRegions; r++) {
-        const zone = a_em[6*r + 3];
-        const o = a_em[6*r + 4];
+        const zone = a_em[7*r + 3];
+        const o = a_em[7*r + 4];
         if (objForbidden(o, OBJ_BUILDING)) continue; // erased: no building
         const forced = objForced(o, OBJ_BUILDING);
         // buildings belong in developable zones, unless explicitly painted
         if (!forced && zone !== CITY_RESIDENTIAL && zone !== CITY_COMMERCIAL) continue;
-        const e = a_em[6*r + 0];
+        const e = a_em[7*r + 0];
         if (e < 0.0) continue; // no buildings on water
         const x = mesh.x_of_r(r), y = mesh.y_of_r(r);
         const n = hash01(x, y);
@@ -291,8 +293,8 @@ function setTreeGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array, densit
     let count = 0;
     const t_around: number[] = [];
     for (let r = 0; r < numSolidRegions; r++) {
-        const zone = a_em[6*r + 3];
-        const o = a_em[6*r + 4];
+        const zone = a_em[7*r + 3];
+        const o = a_em[7*r + 4];
         if (objForbidden(o, OBJ_TREE)) continue; // erased: no tree
         const forced = objForced(o, OBJ_TREE);
         // trees belong in parks and yards, unless explicitly painted
@@ -301,7 +303,7 @@ function setTreeGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array, densit
             const isRes = zone === CITY_RESIDENTIAL;
             if (!isPark && !isRes) continue;
         }
-        const e = a_em[6*r + 0];
+        const e = a_em[7*r + 0];
         if (e < 0.0) continue;
         const x = mesh.x_of_r(r), y = mesh.y_of_r(r);
         const n = hash01(x, y);

@@ -255,6 +255,10 @@ class Generator {
      */
     paintTerrainAt(terrainType: number, x0: number, y0: number, outerRadius: number) {
         let {terrain} = this;
+        // terrain values are stored spaced apart (0=auto, 4=snow, 8=grass,
+        // 12=forest, 16=desert) so bilinear sampling between two labels
+        // never lands on a third label.
+        const encoded = 4 * terrainType;
         let xc = (x0 * CANVAS_SIZE) | 0, yc = (y0 * CANVAS_SIZE) | 0;
         let top = Math.ceil(Math.max(0, yc - outerRadius)),
             bottom = Math.floor(Math.min(CANVAS_SIZE-1, yc + outerRadius));
@@ -263,7 +267,7 @@ class Generator {
             let left = Math.max(0, xc - s),
                 right = Math.min(CANVAS_SIZE-1, xc + s);
             for (let x = left; x <= right; x++) {
-                terrain[y * CANVAS_SIZE + x] = terrainType;
+                terrain[y * CANVAS_SIZE + x] = encoded;
             }
         }
 

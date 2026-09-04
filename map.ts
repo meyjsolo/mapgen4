@@ -116,8 +116,10 @@ export default class Map {
     city_r: Int8Array;
     object_t: Int8Array;
     object_r: Int8Array;
-    terrain_t: Int8Array;
-    terrain_r: Int8Array;
+    terrain_t: Float32Array;
+    terrain_r: Float32Array;
+    terrainWeight_t: Float32Array;
+    terrainWeight_r: Float32Array;
 
     constructor (public mesh: Mesh, public t_peaks: number[], param: any) {
         this.spacing = param.spacing;
@@ -139,8 +141,12 @@ export default class Map {
         this.city_r              = new Int8Array(mesh.numRegions);
         this.object_t            = new Int8Array(mesh.numTriangles);
         this.object_r            = new Int8Array(mesh.numRegions);
-        this.terrain_t           = new Int8Array(mesh.numTriangles);
-        this.terrain_r           = new Int8Array(mesh.numRegions);
+        /* Float32 so the bilinear interpolation between terrain labels
+         * survives the trip to the renderer (needed for smooth edges) */
+        this.terrain_t           = new Float32Array(mesh.numTriangles);
+        this.terrain_r           = new Float32Array(mesh.numRegions);
+        this.terrainWeight_t     = new Float32Array(mesh.numTriangles);
+        this.terrainWeight_r     = new Float32Array(mesh.numRegions);
     }
 
     /**
@@ -265,25 +271,92 @@ export default class Map {
     }
 
     /**
-     * Assign the painted terrain type (e.g. snow) by sampling the
-     * constraint canvas at each region and triangle centroid. 0 means
-     * "automatic" — the biome colors are used as usual.
+     * Assign the painted terrain type (e.g. snow) and a blend weight.
+     * Each region/triangle gets:
+     *  - terrain: nearest integer label (0=auto, 1=snow, 2=grass, ...)
+     *  - terrainWeight: 0..1, distance to the nearest "different-or-auto"
+     *    cell, clamped. The weighted field lets the shader fade the
+     *    terrain color into the biome color over a controllable band so
+     *    there is no hard edge between new and old terrain.
+     *
+     * The distance is computed on the 128x128 constraint canvas (cheap),
+     * then weights are bilinear-sampled at each region/triangle centroid.
      */
     assignTerrain(terrainGrid: Float32Array, size: number) {
-        let {mesh, terrain_t, terrain_r} = this;
+        let {mesh, terrain_t, terrain_r, terrainWeight_t, terrainWeight_r} = this;
         let {numSolidTriangles} = mesh;
+
+        const BLEND = 3; // transition-band radius in canvas cells
+
+        // 1. label per canvas cell (0..4)
+        const label = new Int8Array(size * size);
+        for (let p = 0; p < size * size; p++) {
+            label[p] = Math.round(terrainGrid[p] / 4);
+        }
+
+        // 2. distance to the nearest cell with a different label (or auto)
+        const dist = new Int16Array(size * size).fill(32767);
+        const queue = new Int32Array(size * size);
+        let qin = 0, qout = 0;
+        const isTopLabel = (p: number) => label[p] > 0;
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const p = y * size + x;
+                if (!isTopLabel(p)) continue;
+                // collect the 4-neighbour cell's labels
+                const own = label[p];
+                let different = false;
+                if (y > 0 && label[p - size] !== own) different = true;
+                if (y < size-1 && label[p + size] !== own) different = true;
+                if (x > 0 && label[p - 1] !== own) different = true;
+                if (x < size-1 && label[p + 1] !== own) different = true;
+                if (different) { dist[p] = 0; queue[qin++] = p; }
+            }
+        }
+        while (qout < qin) {
+            const p = queue[qout++];
+            const x = p % size, y = (p / size) | 0;
+            const own = label[p];
+            const nd = dist[p] + 1;
+            if (y > 0) { const q = p - size; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (y < size-1) { const q = p + size; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (x > 0) { const q = p - 1; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (x < size-1) { const q = p + 1; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+        }
+
+        // 3. weight per canvas cell, bilinear-sampled at centroids
+        const weight = new Float32Array(size * size);
+        for (let p = 0; p < size * size; p++) {
+            weight[p] = label[p] === 0 ? 0 : Math.min(1, dist[p] / BLEND);
+        }
+
+        function sampleLabel(x: number, y: number): number {
+            x = clamp((x * size) | 0, 0, size - 1);
+            y = clamp((y * size) | 0, 0, size - 1);
+            return label[y * size + x];
+        }
+        function sampleWeight(x: number, y: number): number {
+            x = clamp(x * (size-1), 0, size-2);
+            y = clamp(y * (size-1), 0, size-2);
+            let xi = Math.floor(x), yi = Math.floor(y),
+                xf = x - xi, yf = y - yi;
+            let p = size * yi + xi;
+            let w00 = weight[p], w01 = weight[p + 1],
+                w10 = weight[p + size], w11 = weight[p + size + 1];
+            return ((w00 * (1 - xf) + w01 * xf) * (1 - yf)
+                 + (w10 * (1 - xf) + w11 * xf) * yf);
+        }
+
         for (let t = 0; t < numSolidTriangles; t++) {
             let x = mesh.x_of_t(t) / 1000, y = mesh.y_of_t(t) / 1000;
-            let xi = clamp((x * size) | 0, 0, size - 1),
-                yi = clamp((y * size) | 0, 0, size - 1);
-            terrain_t[t] = terrainGrid[yi * size + xi];
+            terrain_t[t] = sampleLabel(x, y);
+            terrainWeight_t[t] = sampleWeight(x, y);
         }
         for (let r = 0; r < mesh.numRegions; r++) {
-            if (mesh.is_ghost_r(r)) { terrain_r[r] = TERRAIN_NONE; continue; }
+            if (mesh.is_ghost_r(r)) { terrain_r[r] = TERRAIN_NONE; terrainWeight_r[r] = 0; continue; }
             let x = mesh.x_of_r(r) / 1000, y = mesh.y_of_r(r) / 1000;
-            let xi = clamp((x * size) | 0, 0, size - 1),
-                yi = clamp((y * size) | 0, 0, size - 1);
-            terrain_r[r] = terrainGrid[yi * size + xi];
+            terrain_r[r] = sampleLabel(x, y);
+            terrainWeight_r[r] = sampleWeight(x, y);
         }
     }
 
