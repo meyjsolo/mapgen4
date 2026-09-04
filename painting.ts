@@ -307,6 +307,56 @@ Object.defineProperty(exported, 'objects', { get: () => g().objects });
 Object.defineProperty(exported, 'terrain', { get: () => g().terrain });
 Object.defineProperty(exported, 'countryNames', { get: () => sceneNames() });
 
+/* Serialize every scene's painting data (constraint canvases, country
+ * names and flags) for the save/load feature. */
+exported.dumpScenes = () => {
+    const out: any = {};
+    for (const scene of ['wild', 'city']) {
+        const s = scenes[scene];
+        out[scene] = {
+            seed: s.gen.seed,
+            island: s.gen.island,
+            elevation: Array.from(s.gen.elevation),
+            country: Array.from(s.gen.country),
+            city: Array.from(s.gen.city),
+            objects: Array.from(s.gen.objects),
+            terrain: Array.from(s.gen.terrain),
+            names: s.names.slice(),
+            userHasPainted: s.gen.userHasPainted,
+            countryHasPainted: s.gen.countryHasPainted,
+            cityHasPainted: s.gen.cityHasPainted,
+            objectsHasPainted: s.gen.objectsHasPainted,
+            terrainHasPainted: s.gen.terrainHasPainted,
+        };
+    }
+    return out;
+};
+
+exported.loadScenes = (data: any) => {
+    for (const scene of ['wild', 'city']) {
+        const s = scenes[scene], d = data[scene];
+        if (!d) continue;
+        s.gen.seed = d.seed;
+        s.gen.island = d.island;
+        s.gen.elevation.set(d.elevation);
+        s.gen.country.set(d.country);
+        s.gen.city.set(d.city);
+        s.gen.objects.set(d.objects);
+        s.gen.terrain.set(d.terrain);
+        s.names = (d.names ?? []).slice();
+        s.gen.userHasPainted = d.userHasPainted;
+        s.gen.countryHasPainted = d.countryHasPainted;
+        s.gen.cityHasPainted = d.cityHasPainted;
+        s.gen.objectsHasPainted = d.objectsHasPainted;
+        s.gen.terrainHasPainted = d.terrainHasPainted;
+    }
+    /* refresh country name inputs for the active scene */
+    for (let i = 0; i < NUM_COUNTRIES; i++) {
+        const input = document.getElementById(`country-name-${i}`) as HTMLInputElement;
+        if (input) { input.value = scenes[activeScene].names[i]; }
+    }
+};
+
 document.getElementById('button-reset').addEventListener('click', () => {
     g().generate();
     for (let i = 0; i < NUM_COUNTRIES; i++) {

@@ -284,6 +284,66 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
 
     const downloadButton = document.getElementById('button-download');
     if (downloadButton) downloadButton.addEventListener('click', download);
+
+    /* ---- export / import map state ---- */
+    function exportState() {
+        const data = {
+            activeScene,
+            params: params,
+            scenes: Painting.dumpScenes(),
+        };
+        const blob = new Blob([JSON.stringify(data)], {type: 'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.setAttribute('download', 'mapgen4-save.json');
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    function importState(file: File) {
+        file.text().then(text => {
+            const data = JSON.parse(text);
+            if (!data || !data.params || !data.scenes) { throw "bad save file"; }
+            params.wild = Object.assign({}, baseParam, data.params.wild);
+            params.city = Object.assign({}, baseParam, data.params.city);
+            Painting.loadScenes(data.scenes);
+            activeScene = data.activeScene === 'city' ? 'city' : 'wild';
+            getParam().render.city_mode = activeScene === 'city' ? 1 : 0;
+            Painting.setScene(activeScene);
+            cityButton.textContent = activeScene === 'city' ? '切回野外地图' : '切换到城市地图';
+            syncSlidersToScene();
+            generate();
+        }).catch(err => {
+            console.error("import failed", err);
+            alert("导入失败：文件格式不正确");
+        });
+    }
+
+    const exportButton = document.createElement('button');
+    exportButton.setAttribute('id', 'button-export');
+    exportButton.textContent = '导出地图';
+    exportButton.addEventListener('click', exportState);
+
+    const importButton = document.createElement('button');
+    importButton.setAttribute('id', 'button-import');
+    importButton.textContent = '导入地图';
+    const fileInput = document.createElement('input');
+    fileInput.setAttribute('type', 'file');
+    fileInput.setAttribute('accept', '.json');
+    fileInput.style.display = 'none';
+    importButton.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files && fileInput.files[0]) { importState(fileInput.files[0]); }
+        fileInput.value = '';
+    });
+
+    const ioRow = document.createElement('div');
+    ioRow.setAttribute('id', 'io-row');
+    ioRow.appendChild(exportButton);
+    ioRow.appendChild(importButton);
+    ioRow.appendChild(fileInput);
+    document.getElementById('sliders').appendChild(ioRow);
 }
 
 makeMesh().then(main);
