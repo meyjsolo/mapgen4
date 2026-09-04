@@ -135,6 +135,11 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
             label.appendChild(span);
             label.appendChild(slider);
 
+            /* road/tree densities are city-map only; hide their sliders */
+            if (name === 'road_strength' || name === 'tree_density') {
+                label.style.display = 'none';
+            }
+
             container.appendChild(label);
             slider.value = initialValue;
         }
@@ -165,6 +170,8 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
         generate();
     });
     cityContainer.appendChild(cityButton);
+    /* city map entry is hidden; the button and its panel are not shown */
+    cityContainer.style.display = 'none';
     document.getElementById('sliders').appendChild(cityContainer);
 
     /* reflect the active scene's parameters in the sliders */
@@ -308,10 +315,9 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
             params.wild = Object.assign({}, baseParam, data.params.wild);
             params.city = Object.assign({}, baseParam, data.params.city);
             Painting.loadScenes(data.scenes);
-            activeScene = data.activeScene === 'city' ? 'city' : 'wild';
-            getParam().render.city_mode = activeScene === 'city' ? 1 : 0;
+            activeScene = 'wild';
+            getParam().render.city_mode = 0;
             Painting.setScene(activeScene);
-            cityButton.textContent = activeScene === 'city' ? '切回野外地图' : '切换到城市地图';
             syncSlidersToScene();
             generate();
         }).catch(err => {
