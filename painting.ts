@@ -19,7 +19,7 @@ import {
     CITY_NONE, CITY_WATER, CITY_PARK, CITY_RESIDENTIAL, CITY_COMMERCIAL, cityPalette,
     OBJ_NONE, OBJ_ROAD, OBJ_BUILDING, OBJ_TREE,
 } from "./city.ts";
-import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, NUM_TERRAINS} from "./terrains.ts";
+import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, TERRAIN_FOREST, NUM_TERRAINS} from "./terrains.ts";
 
 const CANVAS_SIZE = 128;
 
@@ -413,8 +413,9 @@ for (let t of CITY_OBJECT_TOOLS) {
  * mountain relief; grass keeps the land low and flat (like the valley
  * brush). */
 const TERRAIN_TOOLS = [
-    {key: 'snow',  label: 'snow',  color: 'hsl(210, 30%, 92%)', type: TERRAIN_SNOW,  elevation: +1.0},
-    {key: 'grass', label: 'grass', color: 'hsl(110, 40%, 55%)', type: TERRAIN_GRASS, elevation: +0.05},
+    {key: 'snow',   label: 'snow',   color: 'hsl(210, 30%, 92%)', type: TERRAIN_SNOW,   elevation: +1.0},
+    {key: 'grass',  label: 'grass',  color: 'hsl(110, 40%, 55%)', type: TERRAIN_GRASS,  elevation: +0.05},
+    {key: 'forest', label: 'forest', color: 'hsl(120, 35%, 30%)', type: TERRAIN_FOREST, elevation: +0.1},
 ];
 const TERRAIN_TOOL_KEYS = TERRAIN_TOOLS.map(t => t.key);
 const terrainToolbar = document.getElementById('terrain-tools');
