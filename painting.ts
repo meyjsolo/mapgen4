@@ -665,6 +665,4 @@ function setUpPaintEventHandling() {
 }
 setUpPaintEventHandling();
 
-
-
 export default exported;

@@ -338,7 +338,7 @@ const vert_drape = `
     in float a_terrainweight;
     out vec2 v_em, v_uv, v_xy;
     out float v_z;
-    out float v_country;
+    flat out float v_country;
     out float v_zone;
     out float v_terrain;
     out float v_terrainweight;
@@ -385,7 +385,7 @@ const frag_drape = `
     uniform vec3 u_terrainpalette[8];
     in vec2 v_uv, v_xy, v_em;
     in float v_z;
-    in float v_country;
+    flat in float v_country;
     in float v_zone;
     in float v_terrain;
     in float v_terrainweight;
