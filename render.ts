@@ -512,15 +512,29 @@ const vert_border = `
     precision highp float;
     uniform mat4 u_projection;
     in vec2 a_xy;
+    in float a_w;
+    out float v_w;
     void main() {
+        v_w = a_w;
         gl_Position = u_projection * vec4(a_xy, 0, 1);
     }`;
 
 const frag_border = `
     precision mediump float;
+    in float v_w;
     out vec4 out_fragcolor;
     void main() {
-        out_fragcolor = vec4(0, 0, 0, 1);
+        // soft line: opaque at the centerline, fading toward the edges
+        float alpha = 1.0 - smoothstep(0.6, 1.0, abs(v_w));
+        out_fragcolor = vec4(0, 0, 0, alpha);
+    }`;
+
+const vert_road = `
+    precision highp float;
+    uniform mat4 u_projection;
+    in vec2 a_xy;
+    void main() {
+        gl_Position = u_projection * vec4(a_xy, 0, 1);
     }`;
 
 const frag_road = `
@@ -652,7 +666,7 @@ export default class Renderer {
         this.a_river_xyww = new Float32Array(numRiverVertices * 4);
         /* each border segment is 6 vertices of 2 floats, at most one
          * segment per solid side */
-        this.a_border_xy = new Float32Array(12 * mesh.numSolidSides);
+        this.a_border_xy = new Float32Array(18 * mesh.numSolidSides);
         this.a_road_xy = new Float32Array(12 * mesh.numSolidSides);
         /* each building is 30 vertices of 6 floats (x, y, z, r, g, b) */
         this.a_buildings = new Float32Array(180 * mesh.numSolidRegions);
@@ -728,9 +742,10 @@ export default class Renderer {
             this.buffer_fullscreen.vertexAttribPointer(program.a_uv, 2, gl.FLOAT, false, 0, 0);
         });
         this.program_border = this.webgl.createProgram('border', vert_border, frag_border, (gl, program) => {
-            this.buffer_border_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
+            this.buffer_border_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 12, 0);
+            this.buffer_border_xy.vertexAttribPointer(program.a_w, 1, gl.FLOAT, false, 12, 8);
         });
-        this.program_road = this.webgl.createProgram('road', vert_border, frag_road, (gl, program) => {
+        this.program_road = this.webgl.createProgram('road', vert_road, frag_road, (gl, program) => {
             this.buffer_road_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
         });
         this.program_building = this.webgl.createProgram('building', vert_building, frag_building, (gl, program) => {
@@ -795,7 +810,7 @@ export default class Renderer {
         this.buffer_river_xyww.subdata(0, this.a_river_xyww.subarray(0, 4 * 3 * this.numRiverTriangles));
 
         this.numBorderSegments = Geometry.setBorderGeometry(this.mesh, this.a_quad_em, this.a_border_xy);
-        this.buffer_border_xy.subdata(0, this.a_border_xy.subarray(0, 12 * this.numBorderSegments));
+        this.buffer_border_xy.subdata(0, this.a_border_xy.subarray(0, 18 * this.numBorderSegments));
 
         this.numRoadSegments = Geometry.setRoadGeometry(this.mesh, this.a_quad_em, this.a_road_xy);
         this.buffer_road_xy.subdata(0, this.a_road_xy.subarray(0, 12 * this.numRoadSegments));

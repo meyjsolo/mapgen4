@@ -116,7 +116,7 @@ export function clamp(x: number, lo: number, hi: number): number {
  */
 function setBorderGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array): number {
     const {numSolidSides} = mesh;
-    const HALF_WIDTH = 3.0; // model units; ~0.3% of the map
+    const HALF_WIDTH = 1.2; // model units; thin, softened in the shader
     let segments = 0;
     for (let s = 0; s < numSolidSides; s++) {
         let s2 = mesh.s_opposite_s(s);
@@ -134,13 +134,16 @@ function setBorderGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array): num
         let len = Math.sqrt(dx*dx + dy*dy) || 1;
         let nx = -dy/len * HALF_WIDTH, ny = dx/len * HALF_WIDTH;
 
-        let p = 12 * segments;
-        P[p++] = ax+nx; P[p++] = ay+ny; // A + normal
-        P[p++] = ax-nx; P[p++] = ay-ny; // A - normal
-        P[p++] = bx+nx; P[p++] = by+ny; // B + normal
-        P[p++] = ax-nx; P[p++] = ay-ny;
-        P[p++] = bx-nx; P[p++] = by-ny; // B - normal
-        P[p++] = bx+nx; P[p++] = by+ny;
+        // Each vertex stores [x, y, w] where w = signed distance from the
+        // centerline (-1 at one edge, +1 at the other). The shader turns
+        // this into a soft alpha so the line is thin and smooth.
+        let p = 18 * segments;
+        P[p++] = ax+nx; P[p++] = ay+ny; P[p++] = 1;  // A + normal
+        P[p++] = ax-nx; P[p++] = ay-ny; P[p++] = -1; // A - normal
+        P[p++] = bx+nx; P[p++] = by+ny; P[p++] = 1;  // B + normal
+        P[p++] = ax-nx; P[p++] = ay-ny; P[p++] = -1;
+        P[p++] = bx-nx; P[p++] = by-ny; P[p++] = -1; // B - normal
+        P[p++] = bx+nx; P[p++] = by+ny; P[p++] = 1;
         segments++;
     }
     return segments;
