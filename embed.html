@@ -11,12 +11,12 @@
     #ui {
         display: grid;
         min-height: calc(100vmin - 130px);
-        grid-template-rows: repeat(4, 40px) 240px calc(100vmin - 130px - 160px - 240px);
+        grid-template-rows: repeat(5, 40px) 240px calc(100vmin - 130px - 200px - 240px);
         grid-template-columns: 1fr calc(100vmin - 130px) repeat(4, 44px) 1fr;
         grid-row-gap: 10px;
         grid-column-gap: 10px;
     }
-    #map        { grid-area: 1 / 2 / span 6 / span 1; width:100%; height:100%; position: relative; }
+    #map        { grid-area: 1 / 2 / span 7 / span 1; width:100%; height:100%; position: relative; }
     #tiny       { grid-area: 1 / 3 / span 1 / span 1; }
     #small      { grid-area: 1 / 4 / span 1 / span 1; }
     #medium     { grid-area: 1 / 5 / span 1 / span 1; }
@@ -25,31 +25,29 @@
     #shallow    { grid-area: 2 / 5 / span 1 / span 2; }
     #valley     { grid-area: 3 / 3 / span 1 / span 2; }
     #mountain   { grid-area: 3 / 5 / span 1 / span 2; }
-    #terrain-tools { grid-area: 4 / 3 / span 1 / span 4; display: flex; align-items: center; gap: 10px; overflow: hidden; }
-    #terrain-tools .terrain-label { font-size: 66%; white-space: nowrap; }
-    #terrain-tools .terrain-row { display: flex; gap: 4px; align-items: center; white-space: nowrap; }
-    #terrain-tools .terrain-row button { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%; }
-    #terrain-tools .terrain-row span { font-size: 66%; }
-    #terrain-tools button.current-control { outline: 3px solid hsl(220, 50%, 50%); }
-    #countries  { grid-area: 5 / 3 / span 1 / span 4; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+    #snow       { grid-area: 4 / 3 / span 1 / span 2; }
+    #grass      { grid-area: 4 / 5 / span 1 / span 2; }
+    #forest     { grid-area: 5 / 3 / span 1 / span 2; }
+    #desert     { grid-area: 5 / 5 / span 1 / span 2; }
+    #countries  { grid-area: 6 / 3 / span 1 / span 4; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
     #countries .country-label { flex: 0 0 auto; font-size: 66%; }
     #countries .country-row { display: flex; gap: 4px; align-items: center; }
     #countries .country-row button { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%; }
     #countries .country-row input { flex: 1; min-width: 0; font-size: 66%; height: 20px; box-sizing: border-box; }
     #countries button.current-control { outline: 3px solid hsl(220, 50%, 50%); }
-    #city-tools { grid-area: 5 / 3 / span 1 / span 4; display: none; flex-direction: column; gap: 4px; }
+    #city-tools { grid-area: 6 / 3 / span 1 / span 4; display: none; flex-direction: column; gap: 4px; }
     #city-tools .city-tool-row { display: flex; gap: 4px; align-items: center; }
     #city-tools .city-tool-row button { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%; }
     #city-tools .city-tool-row span { font-size: 66%; }
     #city-tools button.current-control { outline: 3px solid hsl(220, 50%, 50%); }
     #labels { position: absolute; top: 0; left: 0; width: 100%; height: 100%; overflow: hidden; pointer-events: none; }
     .country-name-label { position: absolute; left: 0; top: 0; transform: translate(-50%, -50%); background: rgba(0,0,0,0.55); color: #fff; padding: 1px 6px; border-radius: 3px; font: 13px sans-serif; white-space: nowrap; }
-    #sliders    { grid-area: 6 / 3 / span 1 / span 4; overflow-y: scroll; overflow-x: clip; line-height: 1.1; }
+    #sliders    { grid-area: 7 / 3 / span 1 / span 4; overflow-y: scroll; overflow-x: clip; line-height: 1.1; }
 
     @media (orientation: portrait) {
         /* Put the buttons on bottom instead of on the right */
         #ui {
-            grid-template-rows: calc(100vmin) repeat(6, 40px) 1fr;
+            grid-template-rows: calc(100vmin) repeat(7, 40px) 1fr;
             grid-template-columns: 70px 70px calc(100vmin - 50px - 140px - 40px);
         }
         #map { grid-area: 1 / 1 / span 1 / span 6; }
@@ -61,9 +59,12 @@
         #shallow { grid-area: 3 / 2 / span 1 / span 1; }
         #valley { grid-area: 4 / 2 / span 1 / span 1; }
         #mountain { grid-area: 5 / 2 / span 1 / span 1; }
-        #terrain-tools { grid-area: 6 / 1 / span 1 / span 2; }
-        #countries { grid-area: 7 / 1 / span 1 / span 2; }
-        #sliders { grid-area: 2 / 3 / span 6 / span 1; justify-self: end; width: 100%; column-width: 20ch; }
+        #snow { grid-area: 6 / 1 / span 1 / span 1; }
+        #grass { grid-area: 6 / 2 / span 1 / span 1; }
+        #forest { grid-area: 7 / 1 / span 1 / span 1; }
+        #desert { grid-area: 7 / 2 / span 1 / span 1; }
+        #countries { grid-area: 8 / 1 / span 1 / span 2; }
+        #sliders { grid-area: 2 / 3 / span 7 / span 1; justify-self: end; width: 100%; column-width: 20ch; }
     }
 
     #mapgen4 { width: 100%; height: 100%; cursor: crosshair; }
@@ -106,7 +107,10 @@
   <button id="shallow" title="Water"><svg viewBox="-50 -50 100 100"><text y="45">Water</text><path d="M -50,-20 q 15,20 30,0 q 20,20 40,0 q 15,20 30,0 l 0,40 l -100,0 z" fill="hsl(200,50%,70%)"/></svg></button>
   <button id="valley" title="Valley"><svg viewBox="-50 -50 100 100"><text y="45">Valley</text><path d="M -50,-20 c 20,10 80,10 100,0 l 0,40 l -100,0 z" fill="hsl(100,40%,60%)"/></svg></button>
   <button id="mountain" title="Mountains"><svg viewBox="-50 -50 100 100"><text y="45">Mountains</text><g fill="hsl(60,50%,40%)" stroke="white" stroke-width="2"><path d="M -30,20 l 30,-60 l 30,60 z"/><path d="M -50,20 l 20,-40 l 20,40 z"/><path d="M 10,20 l 15,-30 l 15,30 z"/></g></svg></button>
-  <div id="terrain-tools"><span class="terrain-label">Terrain</span></div>
+  <button id="snow" title="Snow"><svg viewBox="-50 -50 100 100"><text y="45">Snow</text><g fill="hsl(210,20%,95%)" stroke="hsl(210,30%,75%)" stroke-width="2"><path d="M -30,20 l 30,-60 l 30,60 z"/><path d="M -50,20 l 20,-45 l 20,45 z"/><path d="M 10,20 l 15,-35 l 15,35 z"/></g></svg></button>
+  <button id="grass" title="Grass"><svg viewBox="-50 -50 100 100"><text y="45">Grass</text><path d="M -50,-15 c 20,-12 40,12 60,0 c 15,-9 30,6 40,0 l 0,35 l -100,0 z" fill="hsl(110,45%,50%)"/></svg></button>
+  <button id="forest" title="Forest"><svg viewBox="-50 -50 100 100"><text y="45">Forest</text><g fill="hsl(120,45%,25%)"><path d="M -38,25 l 14,-35 l 14,35 z"/><path d="M -12,25 l 15,-38 l 15,38 z"/><path d="M 15,25 l 13,-32 l 13,32 z"/></g></svg></button>
+  <button id="desert" title="Desert"><svg viewBox="-50 -50 100 100"><text y="45">Desert</text><path d="M -50,5 q 20,-20 40,0 q 20,20 40,0 q 10,-10 20,0 l 0,15 l -100,0 z" fill="hsl(45,50%,60%)"/></svg></button>
   <div id="countries"><span class="country-label">Countries</span></div>
   <div id="city-tools"></div>
 

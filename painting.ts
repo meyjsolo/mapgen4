@@ -19,7 +19,7 @@ import {
     CITY_NONE, CITY_WATER, CITY_PARK, CITY_RESIDENTIAL, CITY_COMMERCIAL, cityPalette,
     OBJ_NONE, OBJ_ROAD, OBJ_BUILDING, OBJ_TREE,
 } from "./city.ts";
-import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, TERRAIN_FOREST, NUM_TERRAINS} from "./terrains.ts";
+import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, TERRAIN_FOREST, TERRAIN_DESERT, NUM_TERRAINS} from "./terrains.ts";
 
 const CANVAS_SIZE = 128;
 
@@ -413,36 +413,24 @@ for (let t of CITY_OBJECT_TOOLS) {
  * mountain relief; grass keeps the land low and flat (like the valley
  * brush). */
 const TERRAIN_TOOLS = [
-    {key: 'snow',   label: 'snow',   color: 'hsl(210, 30%, 92%)', type: TERRAIN_SNOW,   elevation: +1.0},
-    {key: 'grass',  label: 'grass',  color: 'hsl(110, 40%, 55%)', type: TERRAIN_GRASS,  elevation: +0.05},
-    {key: 'forest', label: 'forest', color: 'hsl(120, 35%, 30%)', type: TERRAIN_FOREST, elevation: +0.1},
+    {key: 'snow',   label: 'snow',   type: TERRAIN_SNOW,   elevation: +1.0},
+    {key: 'grass',  label: 'grass',  type: TERRAIN_GRASS,  elevation: +0.05},
+    {key: 'forest', label: 'forest', type: TERRAIN_FOREST, elevation: +0.1},
+    {key: 'desert', label: 'desert', type: TERRAIN_DESERT, elevation: +0.05},
 ];
 const TERRAIN_TOOL_KEYS = TERRAIN_TOOLS.map(t => t.key);
-const terrainToolbar = document.getElementById('terrain-tools');
-for (let t of TERRAIN_TOOLS) {
-    const row = document.createElement('div');
-    row.setAttribute('class', 'terrain-row');
-    const btn = document.createElement('button');
-    btn.setAttribute('id', `terrain-tool-${t.key}`);
-    btn.style.background = t.color;
-    btn.setAttribute('title', t.label);
-    btn.addEventListener('click', () => {
-        currentTool = t.key;
-        displayCurrentTool();
-    });
-    const span = document.createElement('span');
-    span.appendChild(document.createTextNode(t.label));
-    row.appendChild(btn);
-    row.appendChild(span);
-    terrainToolbar.appendChild(row);
-}
+/* The four terrain buttons are plain buttons in embed.html (like the
+ * original terrain tools); bind them like the other tools below. */
 
 function setScene(scene: SceneName) {
     activeScene = scene;
     /* countries row and city object tools share the same panel */
     document.getElementById('countries').style.display = scene === 'city' ? 'none' : '';
     document.getElementById('city-tools').style.display = scene === 'city' ? 'flex' : 'none';
-    document.getElementById('terrain-tools').style.display = scene === 'city' ? 'none' : '';
+    /* terrain brushes (snow/grass/forest/desert) are wild-map only */
+    for (const t of TERRAIN_TOOLS) {
+        document.getElementById(t.key).style.display = scene === 'city' ? 'none' : '';
+    }
     if (scene === 'wild' && CITY_TOOL_KEYS.includes(currentTool)) {
         currentTool = 'mountain';
     }
@@ -481,7 +469,6 @@ function displayCurrentTool() {
     if (currentTool !== 'country') {
         let id;
         if (CITY_TOOL_KEYS.includes(currentTool)) { id = `city-tool-${currentTool}`; }
-        else if (TERRAIN_TOOL_KEYS.includes(currentTool)) { id = `terrain-tool-${currentTool}`; }
         else { id = currentTool; }
         document.getElementById(id).classList.add(className);
     }
@@ -515,6 +502,11 @@ window.addEventListener('keydown', e => {
 for (let control of controls) {
     const el = document.getElementById(control[1]) ?? document.getElementById(`city-tool-${control[1]}`);
     if (el) { el.addEventListener('click', () => { control[2](); displayCurrentTool(); }); }
+}
+/* terrain brush buttons (snow/grass/forest/desert) in embed.html */
+for (let t of TERRAIN_TOOLS) {
+    const el = document.getElementById(t.key);
+    if (el) { el.addEventListener('click', () => { currentTool = t.key; displayCurrentTool(); }); }
 }
 displayCurrentTool();
 
