@@ -574,6 +574,7 @@ export default class Renderer {
     numRoadSegments: number = 0;
     numBuildings: number = 0;
     numTrees: number = 0;
+    numForestCanopies: number = 0;
     treeDensity: number = 1;
 
     mesh: Mesh;
@@ -590,6 +591,7 @@ export default class Renderer {
     a_road_xy: Float32Array;
     a_buildings: Float32Array;
     a_trees: Float32Array;
+    a_forest_canopies: Float32Array;
     countryPalette: Float32Array;
     cityPalette: Float32Array;
     terrainPalette: Float32Array;
@@ -626,6 +628,7 @@ export default class Renderer {
     program_road: Program;
     program_building: Program;
     program_tree: Program;
+    program_forest_canopy: Program;
 
     buffer_fullscreen: Buffer;
     buffer_quad_xy: Buffer;
@@ -636,6 +639,7 @@ export default class Renderer {
     buffer_road_xy: Buffer;
     buffer_buildings: Buffer;
     buffer_trees: Buffer;
+    buffer_forest_canopies: Buffer;
 
     constructor (mesh: Mesh) {
         const canvas = document.getElementById('mapgen4') as HTMLCanvasElement;
@@ -672,6 +676,8 @@ export default class Renderer {
         this.a_buildings = new Float32Array(180 * mesh.numSolidRegions);
         /* each tree is 18 vertices of 6 floats (x, y, z, r, g, b) */
         this.a_trees = new Float32Array(108 * mesh.numSolidRegions);
+        /* forest canopy discs: up to 4 per forest region, same layout */
+        this.a_forest_canopies = new Float32Array(108 * 4 * mesh.numSolidRegions);
         this.countryPalette = new Float32Array(3 * NUM_COUNTRIES);
         for (let i = 0; i < NUM_COUNTRIES; i++) {
             let [r, g, b] = countryPalette[i];
@@ -706,6 +712,7 @@ export default class Renderer {
         this.buffer_road_xy = this.webgl.createBuffer({update: 'dynamic', data: this.a_road_xy});
         this.buffer_buildings = this.webgl.createBuffer({update: 'dynamic', data: this.a_buildings});
         this.buffer_trees = this.webgl.createBuffer({update: 'dynamic', data: this.a_trees});
+        this.buffer_forest_canopies = this.webgl.createBuffer({update: 'dynamic', data: this.a_forest_canopies});
 
         this.texture_colormap = this.webgl.createTexture({data: colormap.data, width: colormap.width, height: colormap.height, filter: 'nearest'});
 
@@ -755,6 +762,10 @@ export default class Renderer {
         this.program_tree = this.webgl.createProgram('tree', vert_building, frag_building, (gl, program) => {
             this.buffer_trees.vertexAttribPointer(program.a_xyz, 3, gl.FLOAT, false, 24, 0);
             this.buffer_trees.vertexAttribPointer(program.a_color, 3, gl.FLOAT, false, 24, 12);
+        });
+        this.program_forest_canopy = this.webgl.createProgram('forest_canopy', vert_building, frag_building, (gl, program) => {
+            this.buffer_forest_canopies.vertexAttribPointer(program.a_xyz, 3, gl.FLOAT, false, 24, 0);
+            this.buffer_forest_canopies.vertexAttribPointer(program.a_color, 3, gl.FLOAT, false, 24, 12);
         });
 
         this.screenshotCanvas = document.createElement('canvas');
@@ -818,6 +829,7 @@ export default class Renderer {
         this.numBuildings = Geometry.setBuildingGeometry(this.mesh, this.a_quad_em, this.a_buildings);
         this.buffer_buildings.subdata(0, this.a_buildings.subarray(0, 180 * this.numBuildings));
         this.updateTrees();
+        this.updateForestCanopies();
         this.computeCountryCenters();
     }
 
@@ -966,11 +978,28 @@ export default class Renderer {
         });
     }
 
+    /* Draw the flat forest canopy discs into the drape framebuffer.
+     * They lie at the terrain elevation so the forest reads as a
+     * satellite-style mottled canopy rather than a flat color. */
+    drawForestCanopies() {
+        this.drawGeneric(this.program_forest_canopy, this.fbo_drape, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 18 * this.numForestCanopies);
+        });
+    }
+
     /* Regenerate the tree geometry (used when the map changes and when
      * the tree_density slider moves). */
     updateTrees() {
         this.numTrees = Geometry.setTreeGeometry(this.mesh, this.a_quad_em, this.a_trees, this.treeDensity);
         this.buffer_trees.subdata(0, this.a_trees.subarray(0, 108 * this.numTrees));
+    }
+
+    /* Regenerate the forest canopy discs whenever the map changes. */
+    updateForestCanopies() {
+        this.numForestCanopies = Geometry.setForestCanopyGeometry(this.mesh, this.a_quad_em, this.a_forest_canopies);
+        this.buffer_forest_canopies.subdata(0, this.a_forest_canopies.subarray(0, 108 * this.numForestCanopies));
     }
 
     drawLand(outline_water: number) {
@@ -1101,6 +1130,10 @@ export default class Renderer {
             }
 
             this.drawDrape(renderParam);
+
+            if (this.numForestCanopies > 0) {
+                this.drawForestCanopies();
+            }
 
             if (this.numBuildings > 0 && renderParam.city_mode > 0) {
                 this.drawBuildings();

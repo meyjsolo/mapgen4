@@ -7,6 +7,7 @@
 import Map from "./map.ts";
 import {CITY_WATER, CITY_PARK, CITY_RESIDENTIAL, CITY_COMMERCIAL} from "./city.ts";
 import {OBJ_ROAD, OBJ_BUILDING, OBJ_TREE, objForced, objForbidden} from "./city.ts";
+import {TERRAIN_FOREST} from "./terrains.ts";
 import type {Mesh} from "./types.d.ts";
 
 /**
@@ -352,6 +353,71 @@ function setTreeGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array, densit
 }
 
 /**
+ * Fill a buffer with forest canopy discs for the satellite-view look.
+ * Each forest region gets a few flat circles lying on the terrain
+ * (drawn at the terrain elevation, no 3D height), so from above the
+ * forest reads as a mottled canopy of tree crowns instead of a plain
+ * color patch. Returns the number of discs; each disc is 18 vertices
+ * (6 segments x 3) of 6 floats (x, y, z, r, g, b).
+ */
+function setForestCanopyGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array): number {
+    const {numSolidRegions, numSolidTriangles} = mesh;
+    const SEG = 6;
+    let count = 0;
+    const t_around: number[] = [];
+    for (let r = 0; r < numSolidRegions; r++) {
+        const terrain = a_em[7*r + 5];
+        if (terrain !== TERRAIN_FOREST) continue;
+        const e = a_em[7*r + 0];
+        if (e < 0.0) continue;
+        const x = mesh.x_of_r(r), y = mesh.y_of_r(r);
+
+        let sum = 0, cnt = 0;
+        mesh.t_around_r(r, t_around);
+        for (let t of t_around) {
+            if (t >= numSolidTriangles) continue;
+            sum += Math.hypot(mesh.x_of_t(t) - x, mesh.y_of_t(t) - y);
+            cnt++;
+        }
+        if (cnt === 0) continue;
+        const regionR = (sum / cnt);
+
+        // moderate canopy: most regions get a crown, some stay as plain
+        // forest floor, so the trees tile densely but not completely solid
+        const roll = hash01(x + 0.7, y + 1.9);
+        const nClumps = roll < 0.2 ? 0 : 1;
+        const z = e + 0.15; // small lift to avoid z-fighting with the terrain
+        for (let k = 0; k < nClumps; k++) {
+            const n = hash01(x + 13.1 * k, y + 7.7 * k);
+            const a = n * 2 * Math.PI;
+            const dist = regionR * (0.15 + 0.45 * hash01(x + k, y + k));
+            const cx = x + dist * Math.cos(a);
+            const cy = y + dist * Math.sin(a);
+            const cr = regionR * (0.85 + 0.15 * hash01(x + 3.1 * k, y + 5.3 * k));
+
+            // two-tone canopy: mottled gray-green crowns like a
+            // satellite view, lighter patches interleaved with shadows
+            const tone = hash01(x + k, y + k) < 0.4 ? 1.0 : 0.62;
+            const base = [0.19 * tone, 0.36 * tone, 0.14 * tone];
+
+            let p = 108 * count;
+            for (let i = 0; i < SEG; i++) {
+                const a0 = 2 * Math.PI * i / SEG,
+                      a1 = 2 * Math.PI * (i+1) / SEG;
+                const b0x = cx + cr * Math.cos(a0), b0y = cy + cr * Math.sin(a0);
+                const b1x = cx + cr * Math.cos(a1), b1y = cy + cr * Math.sin(a1);
+                for (let c of [[cx, cy, z], [b0x, b0y, z], [b1x, b1y, z]]) {
+                    P[p++] = c[0]; P[p++] = c[1]; P[p++] = c[2];
+                    P[p++] = base[0]; P[p++] = base[1]; P[p++] = base[2];
+                }
+            }
+            count++;
+        }
+    }
+    return count;
+}
+
+/**
  * Fill a buffer with river geometry
  */
 function setRiverGeometry(map: Map, spacing: number, riversParam: any, P: Float32Array): number {
@@ -405,4 +471,4 @@ function setRiverGeometry(map: Map, spacing: number, riversParam: any, P: Float3
     return p / 12;
 };
 
-export default {setMeshGeometry, setMapGeometry, setRiverGeometry, setBorderGeometry, setRoadGeometry, setBuildingGeometry, setTreeGeometry};
+export default {setMeshGeometry, setMapGeometry, setRiverGeometry, setBorderGeometry, setRoadGeometry, setBuildingGeometry, setTreeGeometry, setForestCanopyGeometry};
