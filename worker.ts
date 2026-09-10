@@ -58,7 +58,7 @@ function handleGenTile(event) {
     const mk = mapKey(scene, lod, tx, ty);
     let map = maps.get(mk);
     if (!map) {
-        map = new MapGen(mm.mesh, mm.t_peaks, {...param, spacing});
+        map = new MapGen(mm.mesh, mm.t_peaks, {...param, spacing}, mountainPeaks);
         maps.set(mk, map);
     }
 

@@ -41,28 +41,59 @@ function hash01(x: number, y: number): number {
 
 /**
  * Mountains are peaks surrounded by steep dropoffs. In the point
- * selection process (mesh.js) we pick the mountain peak locations.
- * Here we calculate a distance field from peaks to all other points.
+ * selection process we pick the mountain peak locations (world-level,
+ * LOD-independent). Here we calculate a distance field from peaks to all
+ * other triangles.
  *
- * We'll use breadth first search for this because it's simple and
- * fast. Dijkstra's Algorithm would produce a more accurate distance
- * field, but we only need an approximation. For increased
- * interestingness, we add some randomness to the distance field.
+ * The distance is computed ANALYTICALLY from world position (nearest
+ * peak in world space), NOT via a per-tile graph BFS — this makes the
+ * field a pure function of position, so adjacent tiles and different LODs
+ * produce EXACTLY the same mountain elevation (no seams, mountains stay
+ * aligned while zooming). For increased interestingness we add a smooth
+ * continuous noise term when jaggedness > 0.
  */
-function calculateMountainDistance(mesh: Mesh, t_peaks: number[], spacing: number, jaggedness: number, randFloat: () => number, distance_t: Float32Array) {
-    distance_t.fill(-1);
-    let t_queue = t_peaks.concat([]);
-    for (let i = 0; i < t_queue.length; i++) {
-        let t_current = t_queue[i];
-        for (let j = 0; j < 3; j++) {
-            let s = 3 * t_current + j;
-            let t_neighbor = mesh.t_outer_s(s);
-            if (distance_t[t_neighbor] === -1) {
-                let increment = spacing * (1 + jaggedness * (randFloat() - randFloat()));
-                distance_t[t_neighbor] = distance_t[t_current] + increment;
-                t_queue.push(t_neighbor);
+type PeakIndex = {
+    cell: number;
+    width: number;
+    grid: Map<number, number[]>; // cell key -> [x, y, x, y, ...]
+}
+
+function buildPeakIndex(mountainPeaks: Float32Array, cell: number, worldSize: number): PeakIndex {
+    const width = Math.ceil(worldSize / cell) + 2;
+    const grid = new globalThis.Map<number, number[]>();
+    for (let i = 0; i < mountainPeaks.length; i += 2) {
+        const x = mountainPeaks[i], y = mountainPeaks[i+1];
+        const key = Math.floor(y / cell) * width + Math.floor(x / cell);
+        let arr = grid.get(key);
+        if (!arr) { arr = []; grid.set(key, arr); }
+        arr.push(x, y);
+    }
+    return {cell, width, grid};
+}
+
+function calculateMountainDistance(mesh: Mesh, peakIndex: PeakIndex, jaggedness: number, noise0_t: Float32Array | null, distance_t: Float32Array) {
+    const {cell, width, grid} = peakIndex;
+    const {numTriangles} = mesh;
+    for (let t = 0; t < numTriangles; t++) {
+        const x = mesh.x_of_t(t), y = mesh.y_of_t(t);
+        const cx = Math.floor(x / cell), cy = Math.floor(y / cell);
+        let best = Infinity;
+        for (let dy = -2; dy <= 2; dy++) {
+            for (let dx = -2; dx <= 2; dx++) {
+                const arr = grid.get((cy + dy) * width + (cx + dx));
+                if (!arr) continue;
+                for (let k = 0; k < arr.length; k += 2) {
+                    const ddx = x - arr[k], ddy = y - arr[k+1];
+                    const d = ddx*ddx + ddy*ddy;
+                    if (d < best) best = d;
+                }
             }
         }
+        let d = Math.sqrt(best);
+        if (jaggedness > 0 && noise0_t) {
+            d *= 1 + jaggedness * noise0_t[t];
+        }
+        distance_t[t] = d;
     }
 }
 
@@ -97,6 +128,7 @@ export default class Map {
     seed: number = -1;
     spacing: number;
     worldSize: number;
+    peakIndex: PeakIndex;
     precomputed: PrecalculatedNoise;
     mountainJaggedness: number = -Infinity;
     windAngleDeg: number = Infinity;
@@ -123,9 +155,10 @@ export default class Map {
     terrainWeight_t: Float32Array;
     terrainWeight_r: Float32Array;
 
-    constructor (public mesh: Mesh, public t_peaks: number[], param: any) {
+    constructor (public mesh: Mesh, public t_peaks: number[], param: any, mountainPeaks?: Float32Array) {
         this.spacing = param.spacing;
         this.worldSize = param.world?.size ?? 1000;
+        this.peakIndex = buildPeakIndex(mountainPeaks ?? new Float32Array(0), param.mountainSpacing ?? 35, this.worldSize);
         this.elevation_t         = new Float32Array(mesh.numTriangles);
         this.elevation_r         = new Float32Array(mesh.numRegions);
         this.humidity_r          = new Float32Array(mesh.numRegions);
@@ -469,19 +502,19 @@ export default class Map {
     }
 
     assignElevation(elevationParam, constraints) {
-        if (this.seed !== elevationParam.seed || this.mountainJaggedness !== elevationParam.mountain_jagged) {
-            this.mountainJaggedness = elevationParam.mountain_jagged;
-            calculateMountainDistance(
-                this.mesh, this.t_peaks, this.spacing,
-                this.mountainJaggedness, makeRandFloat(elevationParam.seed),
-                this.mountain_distance_t
-            );
-        }
-
         if (this.seed !== elevationParam.seed) {
             // TODO: function should reuse existing arrays
             this.seed = elevationParam.seed;
             this.precomputed = precalculateNoise(makeRandFloat(elevationParam.seed), this.mesh, this.worldSize);
+        }
+
+        if (this.mountainJaggedness !== elevationParam.mountain_jagged) {
+            this.mountainJaggedness = elevationParam.mountain_jagged;
+            calculateMountainDistance(
+                this.mesh, this.peakIndex, this.mountainJaggedness,
+                this.precomputed?.noise0_t ?? null,
+                this.mountain_distance_t
+            );
         }
 
         this.assignTriangleElevation(elevationParam, constraints);

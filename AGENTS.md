@@ -28,7 +28,7 @@ There is **no lint, no typecheck, and no test command**. esbuild does not type-c
 
 - `mapgen4.ts` — entrypoint/UI wiring; creates the `WorldManager` + `Renderer`, talks to the worker (init + per-tile genTile messages).
 - `world.ts` — `WorldManager`: quadtree tile pyramid, LOD selection from zoom, viewport culling, LRU tile cache, painting invalidation. Every tile at every LOD holds ~same cell count (native detail scale), so detail is consistent and visible cells stay bounded.
-- `tile-mesh.ts` — builds one tile's `TriangleMesh` in the worker (Delaunator + ghost structure + shared mountain peaks).
+- `tile-mesh.ts` — builds one tile's `TriangleMesh` in the worker (Delaunator + ghost structure). Interior points use a **deterministic jittered-staggered grid** (`generate-points.ts` `jitteredGridPoints`) so adjacent tiles generate identical points in their shared apron — the Delaunay triangulation matches across seams (seamless tiles). Mountain peaks (world-level shared set) are mapped to their nearest region.
 - `mesh-extras.ts` — serialize/deserialize `TriangleMesh` across the worker boundary + `addMeshExtras` (is_boundary_t, length_s).
 - `worker.ts` — map generation in the worker; per-tile `genTile` messages; caches tile meshes and per-scene `Map` instances; scales `lg_min_flow` per LOD (river continuity).
 - `map.ts` — terrain algorithms (elevation, rainfall, rivers); now world-size-parameterized.

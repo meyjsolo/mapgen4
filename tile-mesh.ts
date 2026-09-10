@@ -39,22 +39,44 @@ export function makeTileMesh(seed: number, spacing: number, mountainSpacing: num
     const mesh = new TriangleMesh(meshInit) as Mesh;
     addMeshExtras(mesh);
 
-    // Mountain peaks were inserted as mesh regions (when accepted). Map
-    // each peak that falls inside the rect to its neighboring triangle.
-    const index = new Map<string, number>();
+    // Mountain peaks are NOT mesh points; map each peak inside the rect to
+    // its nearest region (via a coarse bucket index) so the mountain
+    // distance field anchors correctly. The anchor is within ~half a cell
+    // of the exact peak, keeping mountains aligned across LODs/tiles.
+    const [x0, y0, w, h] = rect;
+    const bucketSize = spacing * 4;
+    const buckets = new Map<number, number[]>();
+    const bw = Math.floor(w / bucketSize) + 2;
     for (let r = 0; r < mesh.numRegions; r++) {
-        const key = mesh.x_of_r(r) + ',' + mesh.y_of_r(r);
-        if (!index.has(key)) { index.set(key, r); }
+        const bx = Math.floor((mesh.x_of_r(r) - x0) / bucketSize);
+        const by = Math.floor((mesh.y_of_r(r) - y0) / bucketSize);
+        const key = by * bw + bx;
+        let arr = buckets.get(key);
+        if (!arr) { arr = []; buckets.set(key, arr); }
+        arr.push(r);
     }
 
-    const [x0, y0, w, h] = rect;
     const t_peaks: number[] = [];
     for (let i = 0; i < mountainPeaks.length; i += 2) {
         const px = mountainPeaks[i], py = mountainPeaks[i+1];
         if (px < x0 || px >= x0 + w || py < y0 || py >= y0 + h) continue;
-        const r = index.get(px + ',' + py);
-        if (r === undefined) continue;
-        t_peaks.push(mesh.t_inner_s(mesh._s_of_r[r]));
+        const cx = (px - x0) / bucketSize, cy = (py - y0) / bucketSize;
+        const bx = Math.floor(cx), by = Math.floor(cy);
+        let bestR = -1, bestD = Infinity;
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                const arr = buckets.get((by + dy) * bw + (bx + dx));
+                if (!arr) continue;
+                for (const r of arr) {
+                    const ddx = mesh.x_of_r(r) - px, ddy = mesh.y_of_r(r) - py;
+                    const d = ddx*ddx + ddy*ddy;
+                    if (d < bestD) { bestD = d; bestR = r; }
+                }
+            }
+        }
+        if (bestR >= 0) {
+            t_peaks.push(mesh.t_inner_s(mesh._s_of_r[bestR]));
+        }
     }
 
     return {mesh, t_peaks, numMountainPoints: data.numMountainPoints};
