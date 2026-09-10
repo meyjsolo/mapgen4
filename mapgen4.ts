@@ -14,10 +14,11 @@
  */
 
 import baseParam from "./config.js";
-import {makeMesh} from "./mesh.ts";
+import {WorldManager} from "./world.ts";
 import Painting from "./painting.ts";
 import Renderer from "./render.ts";
-import type {Mesh} from "./types.d.ts";
+import Bench from "./benchmark.ts";
+import type {Tile} from "./world.ts";
 
 /* The wild and city scenes are two completely independent maps: each
  * has its own parameters (seed, terrain, ...) and keeps its own state
@@ -55,9 +56,9 @@ const initialParams = {
         ['flow', 0.2, 0, 1],
     ],
     render: [
-        ['zoom', 100/480, 100/1000, 100/50],
-        ['x', 500, 0, 1000],
-        ['y', 500, 0, 1000],
+        ['zoom', 100/500, 100/4000, 100/50],
+        ['x', 2000, 0, 4000],
+        ['y', 2000, 0, 4000],
         ['light_angle_deg', 80, 0, 360],
         ['slope', 2, 0, 5],
         ['flat', 2.5, 0, 5],
@@ -81,10 +82,12 @@ const initialParams = {
 
     
 /**
- * Starts the UI, once the mesh has been loaded in.
+ * Starts the UI and the tile-based world/render pipeline.
  */
-function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
-    let render = new Renderer(mesh);
+function main() {
+    const world = new WorldManager(getParam());
+    const render = new Renderer(world);
+    render.bench = new Bench(baseParam.benchmark.enabled);
 
     /* set initial parameters */
     for (let phase of ['elevation', 'biomes', 'rivers', 'render']) {
@@ -206,43 +209,76 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
     
     Painting.screenToWorldCoords = (coords) => {
         let out = render.screenToWorld(coords);
-        return [out[0] / 1000, out[1] / 1000];
+        let size = getParam().world.size;
+        return [out[0] / size, out[1] / size];
     };
 
-    Painting.onUpdate = () => {
-        generate();
+    const numWorkers = Math.max(1, getParam().world.maxWorkers ?? 4);
+    const workers = Array.from({length: numWorkers}, () => new window.Worker("build/_worker.js"));
+    let workerRR = 0;
+    let initialized = false;
+    let initializedCount = 0;
+
+    for (const w of workers) {
+        w.addEventListener('messageerror', event => {
+            console.log("WORKER ERROR", event);
+        });
+        w.addEventListener('message', event => {
+            const d = event.data;
+            if (d.type === 'initDone') {
+                initializedCount++;
+                if (initializedCount >= workers.length) {
+                    initialized = true;
+                    redraw();
+                }
+                return;
+            }
+            if (d.type === 'tileReady') {
+                const tile = world.tiles.get(d.key);
+                if (!tile) return; /* tile was evicted while generating */
+                world.markTileReady(d.key, d);
+                render.onTileReady(tile, d, {
+                    borders: Painting.countryHasPainted(),
+                    roads: d.scene === 'city',
+                    buildings: d.scene === 'city',
+                    trees: d.scene === 'city',
+                    canopies: d.scene === 'wild',
+                });
+                if (render.bench) render.bench.reportGen(d.elapsed);
+                redraw();
+            }
+        });
+    }
+
+    /* Request generation of a tile; distribute across workers round-robin. */
+    world.onRequestTile = (tile: Tile) => {
+        if (!initialized) return;
+        const p = getParam();
+        Painting.setElevationParam(p.elevation);
+        workers[workerRR++ % workers.length].postMessage({
+            type: 'genTile',
+            key: tile.key,
+            scene: activeScene,
+            lod: tile.lod,
+            tx: tile.tx,
+            ty: tile.ty,
+            genRect: tile.genRect,
+            param: p,
+            constraints: {
+                size: Painting.size,
+                constraints: Painting.constraints,
+                country: Painting.country,
+                city: Painting.city,
+                objects: Painting.objects,
+                terrain: Painting.terrain,
+            },
+        });
     };
 
-    const worker = new window.Worker("build/_worker.js");
-    let working = false;
-    let workRequested = false;
-    let elapsedTimeHistory = [];
-
-    worker.addEventListener('messageerror', event => {
-        console.log("WORKER ERROR", event);
-    });
-    
-    worker.addEventListener('message', event => {
-        working = false;
-        let {elapsed, numRiverTriangles, quad_elements_buffer, a_quad_em_buffer, a_river_xyww_buffer} = event.data;
-        elapsedTimeHistory.push(elapsed | 0);
-        if (elapsedTimeHistory.length > 10) { elapsedTimeHistory.splice(0, 1); }
-        const timingDiv = document.getElementById('timing');
-        if (timingDiv) { timingDiv.innerText = `${elapsedTimeHistory.join(' ')} milliseconds`; }
-        render.quad_elements = new Int32Array(quad_elements_buffer);
-        render.a_quad_em = new Float32Array(a_quad_em_buffer);
-        render.a_river_xyww = new Float32Array(a_river_xyww_buffer);
-        render.numRiverTriangles = numRiverTriangles;
-        render.updateMap();
-        render.setCountryNames(Painting.countryNames);
-        redraw();
-        if (workRequested) {
-            requestAnimationFrame(() => {
-                workRequested = false;
-                generate();
-            });
-        }
-    });
+    /* Drop the tile's GPU buffers + geometry when evicted from the cache. */
+    world.onTileEvicted = (tile: Tile) => {
+        render.releaseTile(tile);
+    };
 
     function updateUI() {
         let userHasPainted = Painting.userHasPainted();
@@ -255,39 +291,47 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
         (document.querySelector("#button-reset") as HTMLInputElement).disabled = !(userHasPainted || countryHasPainted || cityHasPainted || objectsHasPainted || terrainHasPainted);
     }
     
+    /* Invalidate the viewport's tiles and redraw; used when painting or
+     * terrain parameters change. Only the visible tiles are regenerated. */
     function generate() {
-        if (!working) {
-            working = true;
-            const p = getParam();
-            Painting.setElevationParam(p.elevation);
-            updateUI();
-            worker.postMessage({
-                param: p,
-                scene: activeScene,
-                constraints: {
-                    size: Painting.size,
-                    constraints: Painting.constraints,
-                    country: Painting.country,
-                    city: Painting.city,
-                    objects: Painting.objects,
-                    terrain: Painting.terrain,
-                },
-                quad_elements_buffer: render.quad_elements.buffer,
-                a_quad_em_buffer: render.a_quad_em.buffer,
-                a_river_xyww_buffer: render.a_river_xyww.buffer,
-            }, [
-                render.quad_elements.buffer,
-                render.a_quad_em.buffer,
-                render.a_river_xyww.buffer,
-            ]
-            );
-        } else {
-            workRequested = true;
-        }
+        const rp = getParam().render;
+        const visibleW = 200 / rp.zoom;
+        world.invalidateRect([rp.x - visibleW/2, rp.y - visibleW/2, visibleW, visibleW]);
+        render.setCountryNames(Painting.countryNames);
+        updateUI();
+        redraw();
     }
 
-    worker.postMessage({mesh, t_peaks, param: getParam()});
-    generate();
+        /* Painting fires onUpdate for every pointer move. The original mapgen4
+     * feel is that the real terrain follows the brush: regenerate in rounds
+     * while painting (never more than one round in flight, so the workers
+     * aren't flooded and results stay ordered), and keep showing the last
+     * data until each round lands. The colored preview overlay is optional
+     * (config lod.paintPreview). */
+    Painting.previewEnabled = baseParam.lod.paintPreview ?? false;
+    let paintTimer: number | null = null;
+    Painting.onUpdate = () => {
+        if (Painting.previewEnabled) redraw(); // instant overlay feedback
+        if (paintTimer === null && !world.hasPendingWork()) {
+            paintTimer = window.setTimeout(() => {
+                paintTimer = null;
+                generate();
+            }, getParam().lod.paintDebounceMs ?? 30);
+        }
+    };
+    render.setCountryNames(Painting.countryNames);
+
+    /* Kick off the workers with the world/lod configuration. */
+    const p = getParam();
+    for (const w of workers) {
+        w.postMessage({
+            type: 'init',
+            world: p.world,
+            lod: p.lod,
+            meshSeed: p.mesh.seed,
+            mountainSpacing: p.world.mountainSpacing,
+        });
+    }
 
     const downloadButton = document.getElementById('button-download');
     if (downloadButton) downloadButton.addEventListener('click', download);
@@ -352,4 +396,4 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
     document.getElementById('sliders').appendChild(ioRow);
 }
 
-makeMesh().then(main);
+main();

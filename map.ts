@@ -69,7 +69,7 @@ function calculateMountainDistance(mesh: Mesh, t_peaks: number[], spacing: numbe
 /**
  * Save noise values in arrays.
  */
-function precalculateNoise(randFloat: () => number, mesh: Mesh): PrecalculatedNoise {
+function precalculateNoise(randFloat: () => number, mesh: Mesh, worldSize: number): PrecalculatedNoise {
     const noise2D = createNoise2D(randFloat);
     let {numTriangles} = mesh;
     let noise0_t = new Float32Array(numTriangles),
@@ -78,9 +78,10 @@ function precalculateNoise(randFloat: () => number, mesh: Mesh): PrecalculatedNo
         noise4_t = new Float32Array(numTriangles),
         noise5_t = new Float32Array(numTriangles),
         noise6_t = new Float32Array(numTriangles);
+    let half = worldSize / 2;
     for (let t = 0; t < numTriangles; t++) {
-        let nx = (mesh.x_of_t(t)-500) / 500,
-            ny = (mesh.y_of_t(t)-500) / 500;
+        let nx = (mesh.x_of_t(t)-half) / half,
+            ny = (mesh.y_of_t(t)-half) / half;
         noise0_t[t] = noise2D(nx, ny);
         noise1_t[t] = noise2D(2*nx + 5, 2*ny + 5);
         noise2_t[t] = noise2D(4*nx + 7, 4*ny + 7);
@@ -95,6 +96,7 @@ function precalculateNoise(randFloat: () => number, mesh: Mesh): PrecalculatedNo
 export default class Map {
     seed: number = -1;
     spacing: number;
+    worldSize: number;
     precomputed: PrecalculatedNoise;
     mountainJaggedness: number = -Infinity;
     windAngleDeg: number = Infinity;
@@ -123,6 +125,7 @@ export default class Map {
 
     constructor (public mesh: Mesh, public t_peaks: number[], param: any) {
         this.spacing = param.spacing;
+        this.worldSize = param.world?.size ?? 1000;
         this.elevation_t         = new Float32Array(mesh.numTriangles);
         this.elevation_r         = new Float32Array(mesh.numRegions);
         this.humidity_r          = new Float32Array(mesh.numRegions);
@@ -158,7 +161,7 @@ export default class Map {
         let {mesh, country_t, country_r} = this;
         let {numSolidTriangles} = mesh;
         for (let t = 0; t < numSolidTriangles; t++) {
-            let x = mesh.x_of_t(t)/1000, y = mesh.y_of_t(t)/1000;
+            let x = mesh.x_of_t(t)/this.worldSize, y = mesh.y_of_t(t)/this.worldSize;
             let xi = clamp((x * size) | 0, 0, size-1),
                 yi = clamp((y * size) | 0, 0, size-1);
             country_t[t] = countryGrid[yi * size + xi];
@@ -192,11 +195,12 @@ export default class Map {
      */
     assignCity(cityGrid: Float32Array, size: number) {        let {mesh, city_t, city_r, elevation_r} = this;
         let {numSolidTriangles} = mesh;
+        const half = this.worldSize / 2;
 
         function autoZone(r: number): number {
             const x = mesh.x_of_r(r), y = mesh.y_of_r(r);
             if (elevation_r[r] < 0.0) return CITY_WATER;
-            const d = Math.hypot(x - 500, y - 500) / 500;
+            const d = Math.hypot(x - half, y - half) / half;
             const n = hash01(x, y);
             if (d < 0.12 + 0.06 * n) return CITY_COMMERCIAL;
             if (d < 0.38 + 0.16 * n) return CITY_RESIDENTIAL;
@@ -204,7 +208,7 @@ export default class Map {
         }
 
         for (let t = 0; t < numSolidTriangles; t++) {
-            let x = mesh.x_of_t(t) / 1000, y = mesh.y_of_t(t) / 1000;
+            let x = mesh.x_of_t(t) / this.worldSize, y = mesh.y_of_t(t) / this.worldSize;
             let xi = clamp((x * size) | 0, 0, size - 1),
                 yi = clamp((y * size) | 0, 0, size - 1);
             city_t[t] = cityGrid[yi * size + xi];
@@ -256,14 +260,14 @@ export default class Map {
         let {mesh, object_t, object_r} = this;
         let {numSolidTriangles} = mesh;
         for (let t = 0; t < numSolidTriangles; t++) {
-            let x = mesh.x_of_t(t) / 1000, y = mesh.y_of_t(t) / 1000;
+            let x = mesh.x_of_t(t) / this.worldSize, y = mesh.y_of_t(t) / this.worldSize;
             let xi = clamp((x * size) | 0, 0, size - 1),
                 yi = clamp((y * size) | 0, 0, size - 1);
             object_t[t] = objectGrid[yi * size + xi];
         }
         for (let r = 0; r < mesh.numRegions; r++) {
             if (mesh.is_ghost_r(r)) { object_r[r] = OBJ_NONE; continue; }
-            let x = mesh.x_of_r(r) / 1000, y = mesh.y_of_r(r) / 1000;
+            let x = mesh.x_of_r(r) / this.worldSize, y = mesh.y_of_r(r) / this.worldSize;
             let xi = clamp((x * size) | 0, 0, size - 1),
                 yi = clamp((y * size) | 0, 0, size - 1);
             object_r[r] = objectGrid[yi * size + xi];
@@ -348,13 +352,13 @@ export default class Map {
         }
 
         for (let t = 0; t < numSolidTriangles; t++) {
-            let x = mesh.x_of_t(t) / 1000, y = mesh.y_of_t(t) / 1000;
+            let x = mesh.x_of_t(t) / this.worldSize, y = mesh.y_of_t(t) / this.worldSize;
             terrain_t[t] = sampleLabel(x, y);
             terrainWeight_t[t] = sampleWeight(x, y);
         }
         for (let r = 0; r < mesh.numRegions; r++) {
             if (mesh.is_ghost_r(r)) { terrain_r[r] = TERRAIN_NONE; terrainWeight_r[r] = 0; continue; }
-            let x = mesh.x_of_r(r) / 1000, y = mesh.y_of_r(r) / 1000;
+            let x = mesh.x_of_r(r) / this.worldSize, y = mesh.y_of_r(r) / this.worldSize;
             terrain_r[r] = sampleLabel(x, y);
             terrainWeight_r[r] = sampleWeight(x, y);
         }
@@ -397,7 +401,7 @@ export default class Map {
                 + (e10 * (1 - xFrac) + e11 * xFrac) * yFrac);
         }
         for (let t = 0; t < numSolidTriangles; t++) {
-            let e = constraintAt(mesh.x_of_t(t)/1000, mesh.y_of_t(t)/1000);
+            let e = constraintAt(mesh.x_of_t(t)/this.worldSize, mesh.y_of_t(t)/this.worldSize);
             // TODO: e*e*e*e seems too steep for this, as I want this
             // to apply mostly at the original coastlines and not
             // elsewhere
@@ -477,7 +481,7 @@ export default class Map {
         if (this.seed !== elevationParam.seed) {
             // TODO: function should reuse existing arrays
             this.seed = elevationParam.seed;
-            this.precomputed = precalculateNoise(makeRandFloat(elevationParam.seed), this.mesh);
+            this.precomputed = precalculateNoise(makeRandFloat(elevationParam.seed), this.mesh, this.worldSize);
         }
 
         this.assignTriangleElevation(elevationParam, constraints);

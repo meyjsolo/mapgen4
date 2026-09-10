@@ -19,7 +19,7 @@ import {
     CITY_NONE, CITY_WATER, CITY_PARK, CITY_RESIDENTIAL, CITY_COMMERCIAL, cityPalette,
     OBJ_NONE, OBJ_ROAD, OBJ_BUILDING, OBJ_TREE,
 } from "./city.ts";
-import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, TERRAIN_FOREST, TERRAIN_DESERT, NUM_TERRAINS} from "./terrains.ts";
+import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, TERRAIN_FOREST, TERRAIN_DESERT, NUM_TERRAINS, terrainPalette} from "./terrains.ts";
 
 const CANVAS_SIZE = 128;
 
@@ -298,6 +298,12 @@ let exported = {
     objectsHasPainted: () => g().objectsHasPainted,
     terrainHasPainted: () => g().terrainHasPainted,
     setScene: (scene: SceneName) => { setScene(scene); },
+    /* Live brush preview: screen-space discs drawn immediately while
+     * painting so the brush feels 跟手, until the tile regeneration
+     * (which happens in the background) produces the real terrain. */
+    preview: [] as {x: number; y: number; radius: number; r: number; g: number; b: number}[],
+    previewTimer: null as number | null,
+    previewEnabled: true, /* set from config (lod.paintPreview); off = original direct-paint feel */
 };
 /* The active scene's constraint arrays are exposed as live getters. */
 Object.defineProperty(exported, 'constraints', { get: () => g().elevation });
@@ -565,6 +571,24 @@ for (let t of TERRAIN_TOOLS) {
 displayCurrentTool();
 
 
+/* Preview color for the currently selected tool (live brush feedback). */
+function previewColor(): [number, number, number] {
+    if (currentTool === 'country') return countryPalette[currentCountry];
+    if (CITY_TOOL_KEYS.includes(currentTool)) {
+        if (currentTool === 'road') return [0.10, 0.10, 0.11];
+        if (currentTool === 'building') return [0.55, 0.45, 0.35];
+        if (currentTool === 'tree') return [0.18, 0.42, 0.20];
+        return [0.82, 0.82, 0.82]; // erase
+    }
+    if (TERRAIN_TOOL_KEYS.includes(currentTool)) {
+        const t = TERRAIN_TOOLS.find(x => x.key === currentTool)!;
+        return terrainPalette[t.type];
+    }
+    if (activeScene === 'city') return cityPalette[CITY_TOOLS[currentTool]] as [number, number, number];
+    const wild: any = {ocean: [0.25, 0.45, 0.85], shallow: [0.45, 0.70, 0.92], valley: [0.40, 0.70, 0.32], mountain: [0.78, 0.68, 0.48]};
+    return wild[currentTool] ?? [0.9, 0.85, 0.75];
+}
+
 function setUpPaintEventHandling() {
     const el = document.getElementById('mapgen4');
     let dragging = false;
@@ -579,6 +603,8 @@ function setUpPaintEventHandling() {
         currentStroke.time.fill(0);
         currentStroke.strength.fill(0);
         currentStroke.previousElevation.set(g().elevation);
+        if (exported.previewTimer !== null) { clearTimeout(exported.previewTimer); exported.previewTimer = null; }
+        exported.preview.length = 0; // fresh stroke preview
         move(event);
     }
 
@@ -654,6 +680,24 @@ function setUpPaintEventHandling() {
                         brushSize, nowMs - timestamp);
         }
         timestamp = nowMs;
+
+        /* Record a live brush preview. Radius is in normalized world
+         * [0,1]; coords are already normalized world [0,1]. */
+        if (exported.previewEnabled && exported.preview) {
+            const PR = (e: number) => Math.min(1, Math.max(0, e));
+            const c = previewColor();
+            exported.preview.push({
+                x: coords[0], y: coords[1],
+                radius: brushSize.outerRadius / CANVAS_SIZE,
+                r: PR(c[0]), g: PR(c[1]), b: PR(c[2]),
+            });
+            if (exported.preview.length > 64) exported.preview.splice(0, exported.preview.length - 64);
+            /* the preview is transient: fade out ~700ms after the last move,
+             * by which time the real tile regeneration has landed */
+            if (exported.previewTimer !== null) clearTimeout(exported.previewTimer);
+            exported.previewTimer = setTimeout(() => { exported.preview.length = 0; }, 700) as unknown as number;
+        }
+
         exported.onUpdate();
     }
         

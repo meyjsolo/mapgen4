@@ -3,7 +3,14 @@
  * Copyright 2018, 2025 Red Blob Games <redblobgames@gmail.com>
  * @license Apache-2.0 <https://www.apache.org/licenses/LICENSE-2.0.html>
  *
- * This module uses webgl to render the generated maps
+ * This module uses webgl to render the generated maps.
+ *
+ * LOD/tile pipeline: the world is split into tiles (see world.ts). Each
+ * frame we select the LOD from the zoom level, viewport-cull tiles, and
+ * render only the visible tiles into screen-space framebuffers with the
+ * current projection. Because the framebuffers cover the visible world
+ * area (not the whole world), zooming in re-rasterizes at a higher
+ * spatial resolution and reveals real detail.
  */
 
 import {vec2, vec4, mat4} from 'gl-matrix';
@@ -12,12 +19,16 @@ import Geometry from "./geometry.ts";
 import {NUM_COUNTRIES, countryPalette} from "./countries.ts";
 import {NUM_CITY_ZONES, cityPalette as cityColors} from "./city.ts";
 import {NUM_TERRAINS, terrainPalette as terrainColors} from "./terrains.ts";
+import {deserializeMesh, type SerializedMesh} from "./mesh-extras.ts";
+import Painting from "./painting.ts";
+import type {WorldManager, Tile} from "./world.ts";
 import type {Mesh} from "./types.d.ts";
 
 //////////////////////////////////////////////////////////////////////
 // WebGL wrappers
 
 type Buffer = {
+    id: WebGLBuffer;
     bind(): void;
     vertexAttribPointer(index: GLuint, size: GLint, type: GLenum, normalized: GLboolean, stride: GLsizei, offset: GLintptr): void;
     subdata(offset: number, data: AllowSharedBufferSource): void;
@@ -64,6 +75,7 @@ class WebGLWrapper {
         gl.bindBuffer(target, buffer);
         gl.bufferData(target, options.data, options.update === 'static'? gl.STATIC_DRAW : gl.DYNAMIC_DRAW);
         return {
+            id: buffer,
             bind() {
                 gl.bindBuffer(target, buffer);
             },
@@ -170,7 +182,9 @@ class WebGLWrapper {
         return this._createFramebufferWrapper(framebuffer, texture, options.depth ?? false);
     }
 
-    createProgram(name: string, vert: string, frag: string, setup: (gl: WebGL2RenderingContext, program: Program) => void): Program {
+    /* Programs are created without a VAO / without pre-bound buffers;
+     * the renderer binds per-tile buffers before each draw. */
+    createProgram(name: string, vert: string, frag: string): Program {
         const {gl} = this;
 
         function createShader(type, source): WebGLShader {
@@ -205,11 +219,9 @@ class WebGLWrapper {
         gl.deleteShader(vs);
         gl.deleteShader(fs);
 
-        const vao = gl.createVertexArray();
-
         let program: Program = {
             run(body) {
-                gl.bindVertexArray(vao);
+                gl.bindVertexArray(null);
                 gl.useProgram(pr);
                 body();
                 gl.bindVertexArray(null);
@@ -224,10 +236,6 @@ class WebGLWrapper {
             let name = gl.getActiveUniform(pr, i).name;
             program[name] = gl.getUniformLocation(pr, name);
         }
-
-        gl.bindVertexArray(vao);
-        setup(gl, program);
-        gl.bindVertexArray(null);
 
         return program;
     }
@@ -261,15 +269,8 @@ const frag_river = `
         float dist = sqrt(v_barycentric.b*v_barycentric.b + v_barycentric.r*v_barycentric.r + v_barycentric.b*v_barycentric.r);
         float pos = 0.5;
         float width = 0.35 * mix(v_riverwidth.x, v_riverwidth.y, xt); // variable width from r side to b side
-        // NOTE: I've tried using screen space derivatives to make widths consistent between adjacent triangles,
-        // but it ended up looking worse, so I reverted it. I multiplied the width by 2.0 * fwidth(v_barycentric.g)
-        // and removed the divide by / s_length[s] in setRiverGeometry().
-        // NOTE: the smoothstep is from w + minwidth to w - antialias thickness, but antialias thickness should
-        // be calculated based on the matrix transform because we want it to be roughly 1 pixel; the min width should
-        // probably also be 1 pixel
         float in_river = smoothstep(width + 0.025, max(0.0, width - 0.05), abs(dist - pos));
         vec4 river_color = in_river * vec4(blue, 1);
-        // HACK: for debugging - if (min(v_barycentric.r, min(v_barycentric.g, v_barycentric.b)) < 0.05) river_color = vec4(0, 0, 0, 1);
         out_fragcolor = river_color;
     }`;
 
@@ -281,13 +282,15 @@ const vert_land = `
     out float v_e;
     out vec2 v_xy;
     void main() {
-        vec4 pos = u_projection * vec4(a_xy, 0, 1);
+        // project with the terrain height so the land texture aligns with
+        // the drape pass even when the view is tilted
+        vec4 pos = u_projection * vec4(a_xy, max(0.0, a_em.x), 1);
         v_xy = (1.0 + pos.xy) * 0.5;
         v_e = a_em.x;
         gl_Position = pos;
     }`;
 
- const frag_land = `
+const frag_land = `
     precision highp float;
     uniform sampler2D u_water;
     uniform float u_outline_water;
@@ -301,7 +304,6 @@ const vert_land = `
             float bump = u_outline_water / 256.0;
             float L1 = e + bump;
             float L2 = (e - 0.5) * (bump * 100.0) + 0.5;
-            // TODO: simplify equation
             e = min(L1, mix(L1, L2, river));
         }
         out_elevation = vec4(e, 0, 0, 1);
@@ -330,13 +332,14 @@ const frag_depth = `
 const vert_drape = `
     precision highp float;
     uniform mat4 u_projection;
+    uniform float u_world_size;
     in vec2 a_xy;
     in vec2 a_em;
     in float a_country;
     in float a_zone;
     in float a_terrain;
     in float a_terrainweight;
-    out vec2 v_em, v_uv, v_xy;
+    out vec2 v_em, v_xy;
     out float v_z;
     flat out float v_country;
     out float v_zone;
@@ -348,7 +351,7 @@ const vert_drape = `
         v_zone = a_zone;
         v_terrain = a_terrain;
         v_terrainweight = a_terrainweight;
-        vec2 xy_clamped = clamp(a_xy, vec2(0, 0), vec2(1000, 1000));
+        vec2 xy_clamped = clamp(a_xy, vec2(0.0, 0.0), vec2(u_world_size, u_world_size));
         v_z = max(0.0, a_em.x); // oceans with e<0 still rendered at z=0
         if (xy_clamped != a_xy) { // boundary points
             v_z = -0.5;
@@ -358,8 +361,7 @@ const vert_drape = `
             v_terrain = -1.0;
             v_terrainweight = 0.0;
         }
-        vec4 pos = vec4(u_projection * vec4(xy_clamped, v_z, 1));
-        v_uv = a_xy / 1000.0;
+        vec4 pos = u_projection * vec4(xy_clamped, v_z, 1);
         v_xy = (1.0 + pos.xy) * 0.5;
         gl_Position = pos;
     }`;
@@ -383,7 +385,7 @@ const frag_drape = `
     uniform vec3 u_countrypalette[8];
     uniform vec3 u_citypalette[4];
     uniform vec3 u_terrainpalette[8];
-    in vec2 v_uv, v_xy, v_em;
+    in vec2 v_xy, v_em;
     in float v_z;
     flat in float v_country;
     in float v_zone;
@@ -396,7 +398,7 @@ const frag_drape = `
 
     void main() {
         vec2 sample_offset = 0.5 * u_inverse_texture_size;
-        vec2 pos = v_uv + sample_offset;
+        vec2 pos = v_xy + sample_offset;
         vec2 dx = vec2(u_inverse_texture_size.x, 0),
              dy = vec2(0, u_inverse_texture_size.y);
 
@@ -429,9 +431,6 @@ const frag_drape = `
             biome_color = mix(underground_color, highlight_color, 0.5 * smoothstep(-0.025, 0.0, v_z));
             light = 1.0 - 0.3 * smoothstep(0.8, 1.0, fract((v_em.x - v_z) * 20.0)); // add horizontal lines
         }
-        // if (fract(z * 10.0) < 10.0 * fwidth(z)) { biome_color = vec3(0,0,0); } // contour lines
-
-        // TODO: add noise texture based on biome
 
         float depth0 = texture(u_depth, v_xy).x,
               depth1 = max(max(texture(u_depth, v_xy + u_outline_depth*(-dy-dx)).x,
@@ -563,35 +562,89 @@ const frag_building = `
         out_fragcolor = vec4(v_color, 1);
     }`;
 
+/* Live brush preview: soft translucent discs drawn immediately where the
+ * user paints, until the tile regeneration lands in the background. */
+const vert_preview = `
+    precision highp float;
+    uniform mat4 u_projection;
+    in float a_cx;
+    in float a_cy;
+    in float a_radius;
+    in vec3 a_color;
+    in vec2 a_off;
+    out vec2 v_off;
+    out vec3 v_color;
+    void main() {
+        v_off = a_off;
+        v_color = a_color;
+        vec2 pos = vec2(a_cx + a_off.x * a_radius, a_cy + a_off.y * a_radius);
+        gl_Position = u_projection * vec4(pos, 0.0, 1.0);
+    }`;
+
+const frag_preview = `
+    precision mediump float;
+    in vec2 v_off;
+    in vec3 v_color;
+    out vec4 out_fragcolor;
+    void main() {
+        float d = length(v_off);
+        float a = smoothstep(1.0, 0.35, d) * 0.32;
+        if (a <= 0.0) discard;
+        out_fragcolor = vec4(v_color * a, a); /* premultiplied for ONE/ONE_MINUS_SRC_ALPHA */
+    }`;
+
 //////////////////////////////////////////////////////////////////////
-// Mapgen4 renderer
+// Per-tile geometry + GPU buffers
 
 const fbo_texture_size: number = 2048;
 
+type TileGeo = {
+    mesh: Mesh;
+    a_quad_xy: Float32Array;
+    a_quad_em: Float32Array;
+    quad_elements: Int32Array;
+    quad_elements_length: number;
+    a_river_xyww: Float32Array;
+    numRiverTriangles: number;
+    /* overlay arrays are allocated lazily (only when the tile actually
+     * has that kind of content); each is paired with a count. */
+    a_border_xy: Float32Array | null;
+    numBorderSegments: number;
+    a_road_xy: Float32Array | null;
+    numRoadSegments: number;
+    a_buildings: Float32Array | null;
+    numBuildings: number;
+    a_trees: Float32Array | null;
+    numTrees: number;
+    a_forest_canopies: Float32Array | null;
+    numForestCanopies: number;
+    gpu: TileGpu | null;
+    dirty: boolean;
+}
+
+type TileGpu = {
+    buffer_quad_xy: Buffer;
+    buffer_quad_em: Buffer;
+    buffer_quad_elements: Buffer;
+    buffer_river_xyww: Buffer;
+    buffer_border_xy: Buffer | null;
+    buffer_road_xy: Buffer | null;
+    buffer_buildings: Buffer | null;
+    buffer_trees: Buffer | null;
+    buffer_forest_canopies: Buffer | null;
+}
+
+//////////////////////////////////////////////////////////////////////
+// Mapgen4 renderer
+
 export default class Renderer {
     numRiverTriangles: number = 0;
-    numBorderSegments: number = 0;
-    numRoadSegments: number = 0;
-    numBuildings: number = 0;
-    numTrees: number = 0;
-    numForestCanopies: number = 0;
     treeDensity: number = 1;
 
-    mesh: Mesh;
-    topdown: mat4;
+    world: WorldManager;
     projection: mat4;
     inverse_projection: mat4;
 
-    a_quad_xy: Float32Array;
-    a_quad_em: Float32Array;
-    quad_elements_length: number; // have to store the original size because the worker thread borrows the actual array
-    quad_elements: Int32Array;
-    a_river_xyww: Float32Array;
-    a_border_xy: Float32Array;
-    a_road_xy: Float32Array;
-    a_buildings: Float32Array;
-    a_trees: Float32Array;
-    a_forest_canopies: Float32Array;
     countryPalette: Float32Array;
     cityPalette: Float32Array;
     terrainPalette: Float32Array;
@@ -599,6 +652,7 @@ export default class Renderer {
     countryNames: string[];
     countrySumX: Float32Array;
     countrySumY: Float32Array;
+    countryCount: Int32Array;
     countryCenterX: Float32Array;
     countryCenterY: Float32Array;
     labelLayer: HTMLDivElement;
@@ -629,55 +683,24 @@ export default class Renderer {
     program_building: Program;
     program_tree: Program;
     program_forest_canopy: Program;
+    program_preview: Program;
 
     buffer_fullscreen: Buffer;
-    buffer_quad_xy: Buffer;
-    buffer_quad_em: Buffer;
-    buffer_quad_elements: Buffer;
-    buffer_river_xyww: Buffer;
-    buffer_border_xy: Buffer;
-    buffer_road_xy: Buffer;
-    buffer_buildings: Buffer;
-    buffer_trees: Buffer;
-    buffer_forest_canopies: Buffer;
+    buffer_preview: Buffer;
+    a_preview: Float32Array;
 
-    constructor (mesh: Mesh) {
+    tileGeo = new Map<string, TileGeo>();
+
+    constructor (world: WorldManager) {
         const canvas = document.getElementById('mapgen4') as HTMLCanvasElement;
-        this.mesh = mesh;
+        this.world = world;
         this.webgl = new WebGLWrapper(canvas);
 
         this.resizeCanvas();
 
-        this.topdown = mat4.create();
-        mat4.translate(this.topdown, this.topdown, [-1, -1, 0]);
-        mat4.scale(this.topdown, this.topdown, [1/500, 1/500, 1]);
-
         this.projection = mat4.create();
         this.inverse_projection = mat4.create();
 
-        this.a_quad_xy = new Float32Array(2 * (mesh.numRegions + mesh.numTriangles));
-        /* per-vertex layout: elevation, rainfall, country id, city zone,
-         * object mask */
-        this.a_quad_em = new Float32Array(7 * (mesh.numRegions + mesh.numTriangles));
-        this.quad_elements_length = 3 * mesh.numSolidSides;
-        this.quad_elements = new Int32Array(this.quad_elements_length);
-        /* NOTE: The maximum number of river triangles will be when
-         * there's a single binary tree that has every node filled.
-         * Each of the N/2 leaves will produce 1 output triangle and
-         * each of the N/2 nodes will produce 2 triangles. On average
-         * there will be 1.5 output triangles per input triangle. */
-        const numRiverVertices = 1.5 /* river triangles per input triangle */ * 3 /* vertices per triangle */ * mesh.numSolidTriangles;
-        this.a_river_xyww = new Float32Array(numRiverVertices * 4);
-        /* each border segment is 6 vertices of 2 floats, at most one
-         * segment per solid side */
-        this.a_border_xy = new Float32Array(18 * mesh.numSolidSides);
-        this.a_road_xy = new Float32Array(12 * mesh.numSolidSides);
-        /* each building is 30 vertices of 6 floats (x, y, z, r, g, b) */
-        this.a_buildings = new Float32Array(180 * mesh.numSolidRegions);
-        /* each tree is 18 vertices of 6 floats (x, y, z, r, g, b) */
-        this.a_trees = new Float32Array(108 * mesh.numSolidRegions);
-        /* forest canopy discs: up to 4 per forest region, same layout */
-        this.a_forest_canopies = new Float32Array(108 * 4 * mesh.numSolidRegions);
         this.countryPalette = new Float32Array(3 * NUM_COUNTRIES);
         for (let i = 0; i < NUM_COUNTRIES; i++) {
             let [r, g, b] = countryPalette[i];
@@ -700,73 +723,33 @@ export default class Renderer {
             this.terrainPalette[3*i+2] = b;
         }
 
-        Geometry.setMeshGeometry(mesh, this.a_quad_xy);
-
-        this.buffer_quad_xy = this.webgl.createBuffer({update: 'static', data: this.a_quad_xy});
-        this.buffer_quad_em = this.webgl.createBuffer({update: 'dynamic', data: this.a_quad_em});
-        this.buffer_quad_elements = this.webgl.createBuffer({indices: true, update: 'dynamic', data: this.quad_elements});
-
         this.buffer_fullscreen = this.webgl.createBuffer({update: 'static', data: new Float32Array([-2, 0, 0, -2, 2, 2])});
-        this.buffer_river_xyww = this.webgl.createBuffer({update: 'dynamic', data: this.a_river_xyww});
-        this.buffer_border_xy = this.webgl.createBuffer({update: 'dynamic', data: this.a_border_xy});
-        this.buffer_road_xy = this.webgl.createBuffer({update: 'dynamic', data: this.a_road_xy});
-        this.buffer_buildings = this.webgl.createBuffer({update: 'dynamic', data: this.a_buildings});
-        this.buffer_trees = this.webgl.createBuffer({update: 'dynamic', data: this.a_trees});
-        this.buffer_forest_canopies = this.webgl.createBuffer({update: 'dynamic', data: this.a_forest_canopies});
+
+        /* live brush preview: up to 64 discs x 6 vertices x (8 floats:
+         * cx, cy, radius, r, g, b, ox, oy) */
+        this.a_preview = new Float32Array(64 * 6 * 8);
+        this.buffer_preview = this.webgl.createBuffer({update: 'dynamic', data: this.a_preview});
 
         this.texture_colormap = this.webgl.createTexture({data: colormap.data, width: colormap.width, height: colormap.height, filter: 'nearest'});
 
         this.fbo_land  = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, internalFormat: this.webgl.gl.R16F, filter: 'linear'});
-        this.fbo_depth = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: true, internalFormat: this.webgl.gl.R16F, filter: 'nearest'}); // NOTE: linear requires adjusting parameters
-        this.fbo_river = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, filter: 'linear'}); // linear makes rivers look better
-        this.fbo_drape = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: true, filter: 'linear'}); // linear to smooth out edges
+        this.fbo_depth = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: true, internalFormat: this.webgl.gl.R16F, filter: 'nearest'});
+        this.fbo_river = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, filter: 'linear'});
+        this.fbo_drape = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: true, filter: 'linear'});
         this.fbo_border = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, filter: 'linear'});
         this.fbo_road = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, filter: 'linear'});
 
-        this.program_river = this.webgl.createProgram('river', vert_river, frag_river, (gl, program) => {
-            this.buffer_river_xyww.vertexAttribPointer(program.a_xyww, 4, gl.FLOAT, false, 0, 0);
-        });
-        this.program_land  = this.webgl.createProgram('land', vert_land,  frag_land, (gl, program) => {
-            this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 28, 0);
-            this.buffer_quad_elements.bind();
-        });
-        this.program_depth = this.webgl.createProgram('depth', vert_depth, frag_depth, (gl, program) => {
-            this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 28, 0);
-            this.buffer_quad_elements.bind();
-        });
-        this.program_drape = this.webgl.createProgram('drape', vert_drape, frag_drape, (gl, program) => {
-            this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 28, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_country, 1, gl.FLOAT, false, 28, 8);
-            this.buffer_quad_em.vertexAttribPointer(program.a_zone, 1, gl.FLOAT, false, 28, 12);
-            this.buffer_quad_em.vertexAttribPointer(program.a_terrain, 1, gl.FLOAT, false, 28, 20);
-            this.buffer_quad_em.vertexAttribPointer(program.a_terrainweight, 1, gl.FLOAT, false, 28, 24);
-            this.buffer_quad_elements.bind();
-        });
-        this.program_final = this.webgl.createProgram('final', vert_final, frag_final, (gl, program) => {
-            this.buffer_fullscreen.vertexAttribPointer(program.a_uv, 2, gl.FLOAT, false, 0, 0);
-        });
-        this.program_border = this.webgl.createProgram('border', vert_border, frag_border, (gl, program) => {
-            this.buffer_border_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 12, 0);
-            this.buffer_border_xy.vertexAttribPointer(program.a_w, 1, gl.FLOAT, false, 12, 8);
-        });
-        this.program_road = this.webgl.createProgram('road', vert_road, frag_road, (gl, program) => {
-            this.buffer_road_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-        });
-        this.program_building = this.webgl.createProgram('building', vert_building, frag_building, (gl, program) => {
-            this.buffer_buildings.vertexAttribPointer(program.a_xyz, 3, gl.FLOAT, false, 24, 0);
-            this.buffer_buildings.vertexAttribPointer(program.a_color, 3, gl.FLOAT, false, 24, 12);
-        });
-        this.program_tree = this.webgl.createProgram('tree', vert_building, frag_building, (gl, program) => {
-            this.buffer_trees.vertexAttribPointer(program.a_xyz, 3, gl.FLOAT, false, 24, 0);
-            this.buffer_trees.vertexAttribPointer(program.a_color, 3, gl.FLOAT, false, 24, 12);
-        });
-        this.program_forest_canopy = this.webgl.createProgram('forest_canopy', vert_building, frag_building, (gl, program) => {
-            this.buffer_forest_canopies.vertexAttribPointer(program.a_xyz, 3, gl.FLOAT, false, 24, 0);
-            this.buffer_forest_canopies.vertexAttribPointer(program.a_color, 3, gl.FLOAT, false, 24, 12);
-        });
+        this.program_river = this.webgl.createProgram('river', vert_river, frag_river);
+        this.program_land  = this.webgl.createProgram('land', vert_land, frag_land);
+        this.program_depth = this.webgl.createProgram('depth', vert_depth, frag_depth);
+        this.program_drape = this.webgl.createProgram('drape', vert_drape, frag_drape);
+        this.program_final = this.webgl.createProgram('final', vert_final, frag_final);
+        this.program_border = this.webgl.createProgram('border', vert_border, frag_border);
+        this.program_road = this.webgl.createProgram('road', vert_road, frag_road);
+        this.program_building = this.webgl.createProgram('building', vert_building, frag_building);
+        this.program_tree = this.webgl.createProgram('tree', vert_building, frag_building);
+        this.program_forest_canopy = this.webgl.createProgram('forest_canopy', vert_building, frag_building);
+        this.program_preview = this.webgl.createProgram('preview', vert_preview, frag_preview);
 
         this.screenshotCanvas = document.createElement('canvas');
         this.screenshotCanvas.width = fbo_texture_size;
@@ -778,6 +761,7 @@ export default class Renderer {
         this.countryNames = new Array(NUM_COUNTRIES).fill('');
         this.countrySumX = new Float32Array(NUM_COUNTRIES);
         this.countrySumY = new Float32Array(NUM_COUNTRIES);
+        this.countryCount = new Int32Array(NUM_COUNTRIES);
         this.countryCenterX = new Float32Array(NUM_COUNTRIES).fill(NaN);
         this.countryCenterY = new Float32Array(NUM_COUNTRIES).fill(NaN);
         this.labelLayer = document.getElementById('labels') as HTMLDivElement;
@@ -804,64 +788,410 @@ export default class Renderer {
         let glCoords = vec4.fromValues(
             coords[0] * 2 - 1,
             1 - coords[1] * 2,
-            /* TODO: z should be 0 only when tilt_deg is 0;
-             * need to figure out the proper z value here */
             0,
             1
         );
-        /* it returns vec4 but we only need vec2; they're compatible */
         let transformed = vec4.transformMat4(vec4.create(), glCoords, this.inverse_projection);
         return [transformed[0], transformed[1]];
     }
 
-    /* Update the buffers with the latest map data */
-    updateMap() {
-        this.buffer_quad_em.subdata(0, this.a_quad_em);
-        this.buffer_quad_elements.subdata(0, this.quad_elements);
-        this.buffer_river_xyww.subdata(0, this.a_river_xyww.subarray(0, 4 * 3 * this.numRiverTriangles));
+    /* ---- per-tile geometry handling ---- */
 
-        this.numBorderSegments = Geometry.setBorderGeometry(this.mesh, this.a_quad_em, this.a_border_xy);
-        this.buffer_border_xy.subdata(0, this.a_border_xy.subarray(0, 18 * this.numBorderSegments));
-
-        this.numRoadSegments = Geometry.setRoadGeometry(this.mesh, this.a_quad_em, this.a_road_xy);
-        this.buffer_road_xy.subdata(0, this.a_road_xy.subarray(0, 12 * this.numRoadSegments));
-
-        this.numBuildings = Geometry.setBuildingGeometry(this.mesh, this.a_quad_em, this.a_buildings);
-        this.buffer_buildings.subdata(0, this.a_buildings.subarray(0, 180 * this.numBuildings));
-        this.updateTrees();
-        this.updateForestCanopies();
-        this.computeCountryCenters();
+    onTileReady(tile: Tile, data: {
+        mesh: SerializedMesh;
+        a_quad_em: Float32Array;
+        quad_elements: Int32Array;
+        a_river_xyww: Float32Array;
+        numRiverTriangles: number;
+    }, overlays: {borders: boolean; roads: boolean; buildings: boolean; trees: boolean; canopies: boolean}) {
+        const mesh = deserializeMesh(data.mesh);
+        let geo = this.tileGeo.get(tile.key);
+        if (!geo) {
+            geo = {
+                mesh,
+                a_quad_xy: new Float32Array(2 * (mesh.numRegions + mesh.numTriangles)),
+                a_quad_em: data.a_quad_em,
+                quad_elements: data.quad_elements,
+                quad_elements_length: 3 * mesh.numSolidSides,
+                a_river_xyww: data.a_river_xyww,
+                numRiverTriangles: data.numRiverTriangles,
+                a_border_xy: null, numBorderSegments: 0,
+                a_road_xy: null, numRoadSegments: 0,
+                a_buildings: null, numBuildings: 0,
+                a_trees: null, numTrees: 0,
+                a_forest_canopies: null, numForestCanopies: 0,
+                gpu: null,
+                dirty: true,
+            };
+            Geometry.setMeshGeometry(mesh, geo.a_quad_xy);
+            this.tileGeo.set(tile.key, geo);
+        } else {
+            geo.mesh = mesh;
+            geo.a_quad_em = data.a_quad_em;
+            geo.quad_elements = data.quad_elements;
+            geo.quad_elements_length = 3 * mesh.numSolidSides;
+            geo.a_river_xyww = data.a_river_xyww;
+            geo.numRiverTriangles = data.numRiverTriangles;
+            geo.dirty = true;
+        }
+        this.computeTileOverlays(geo, overlays);
     }
 
-    /* Average the positions of each country's regions to get a label
-     * anchor point; NaN means the country hasn't been painted. */
-    computeCountryCenters() {
-        this.countrySumX.fill(0);
-        this.countrySumY.fill(0);
-        const counts = new Int32Array(NUM_COUNTRIES);
-        const {mesh} = this;
+    computeTileOverlays(geo: TileGeo, overlays: {borders: boolean; roads: boolean; buildings: boolean; trees: boolean; canopies: boolean}) {
+        const {mesh} = geo;
+        if (overlays.borders) {
+            if (!geo.a_border_xy) geo.a_border_xy = new Float32Array(18 * mesh.numSolidSides);
+            geo.numBorderSegments = Geometry.setBorderGeometry(mesh, geo.a_quad_em, geo.a_border_xy);
+        }
+        if (overlays.roads) {
+            if (!geo.a_road_xy) geo.a_road_xy = new Float32Array(12 * mesh.numSolidSides);
+            geo.numRoadSegments = Geometry.setRoadGeometry(mesh, geo.a_quad_em, geo.a_road_xy);
+        }
+        if (overlays.buildings) {
+            if (!geo.a_buildings) geo.a_buildings = new Float32Array(180 * mesh.numSolidRegions);
+            geo.numBuildings = Geometry.setBuildingGeometry(mesh, geo.a_quad_em, geo.a_buildings);
+        }
+        if (overlays.trees) {
+            if (!geo.a_trees) geo.a_trees = new Float32Array(108 * mesh.numSolidRegions);
+            geo.numTrees = Geometry.setTreeGeometry(mesh, geo.a_quad_em, geo.a_trees, this.treeDensity);
+        }
+        if (overlays.canopies) {
+            if (!geo.a_forest_canopies) geo.a_forest_canopies = new Float32Array(108 * mesh.numSolidRegions);
+            geo.numForestCanopies = Geometry.setForestCanopyGeometry(mesh, geo.a_quad_em, geo.a_forest_canopies);
+        }
+        geo.dirty = true;
+    }
+
+    updateTileTrees(tile: Tile) {
+        const geo = this.tileGeo.get(tile.key);
+        if (!geo) return;
+        if (!geo.a_trees) geo.a_trees = new Float32Array(108 * geo.mesh.numSolidRegions);
+        geo.numTrees = Geometry.setTreeGeometry(geo.mesh, geo.a_quad_em, geo.a_trees, this.treeDensity);
+        geo.dirty = true;
+    }
+
+    releaseTile(tile: Tile) {
+        const {gl} = this.webgl;
+        const geo = this.tileGeo.get(tile.key);
+        if (!geo) return;
+        this.tileGeo.delete(tile.key);
+        if (geo.gpu) {
+            const names = ['buffer_quad_xy', 'buffer_quad_em', 'buffer_quad_elements',
+                           'buffer_river_xyww', 'buffer_border_xy', 'buffer_road_xy',
+                           'buffer_buildings', 'buffer_trees', 'buffer_forest_canopies'];
+            for (const name of names) {
+                const b = geo.gpu[name];
+                if (b) gl.deleteBuffer(b.id);
+            }
+        }
+    }
+
+    private createTileBuffers(geo: TileGeo): TileGpu {
+        return {
+            buffer_quad_xy: this.webgl.createBuffer({update: 'static', data: geo.a_quad_xy}),
+            buffer_quad_em: this.webgl.createBuffer({update: 'dynamic', data: geo.a_quad_em}),
+            buffer_quad_elements: this.webgl.createBuffer({indices: true, update: 'dynamic', data: geo.quad_elements}),
+            buffer_river_xyww: this.webgl.createBuffer({update: 'dynamic', data: geo.a_river_xyww}),
+            buffer_border_xy: geo.a_border_xy ? this.webgl.createBuffer({update: 'dynamic', data: geo.a_border_xy}) : null,
+            buffer_road_xy: geo.a_road_xy ? this.webgl.createBuffer({update: 'dynamic', data: geo.a_road_xy}) : null,
+            buffer_buildings: geo.a_buildings ? this.webgl.createBuffer({update: 'dynamic', data: geo.a_buildings}) : null,
+            buffer_trees: geo.a_trees ? this.webgl.createBuffer({update: 'dynamic', data: geo.a_trees}) : null,
+            buffer_forest_canopies: geo.a_forest_canopies ? this.webgl.createBuffer({update: 'dynamic', data: geo.a_forest_canopies}) : null,
+        };
+    }
+
+    private ensureOverlayBuffer(geo: TileGeo, name: string, data: Float32Array | null): Buffer | null {
+        if (!data) return null;
+        if (!geo.gpu) geo.gpu = this.createTileBuffers(geo);
+        if (!geo.gpu[name]) geo.gpu[name] = this.webgl.createBuffer({update: 'dynamic', data});
+        return geo.gpu[name];
+    }
+
+    private uploadTile(geo: TileGeo) {
+        if (!geo.gpu) geo.gpu = this.createTileBuffers(geo);
+        geo.gpu.buffer_quad_em.subdata(0, geo.a_quad_em);
+        geo.gpu.buffer_quad_elements.subdata(0, geo.quad_elements.subarray(0, geo.quad_elements_length));
+        geo.gpu.buffer_river_xyww.subdata(0, geo.a_river_xyww.subarray(0, 4 * 3 * geo.numRiverTriangles));
+        const border = this.ensureOverlayBuffer(geo, 'buffer_border_xy', geo.a_border_xy);
+        if (border) border.subdata(0, geo.a_border_xy.subarray(0, 18 * geo.numBorderSegments));
+        const road = this.ensureOverlayBuffer(geo, 'buffer_road_xy', geo.a_road_xy);
+        if (road) road.subdata(0, geo.a_road_xy.subarray(0, 12 * geo.numRoadSegments));
+        const buildings = this.ensureOverlayBuffer(geo, 'buffer_buildings', geo.a_buildings);
+        if (buildings) buildings.subdata(0, geo.a_buildings.subarray(0, 180 * geo.numBuildings));
+        const trees = this.ensureOverlayBuffer(geo, 'buffer_trees', geo.a_trees);
+        if (trees) trees.subdata(0, geo.a_trees.subarray(0, 108 * geo.numTrees));
+        const canopies = this.ensureOverlayBuffer(geo, 'buffer_forest_canopies', geo.a_forest_canopies);
+        if (canopies) canopies.subdata(0, geo.a_forest_canopies.subarray(0, 108 * geo.numForestCanopies));
+        geo.dirty = false;
+    }
+
+    /* ---- drawing helpers ---- */
+
+    drawGeneric(program: Program, fb: Framebuffer | null, draw: (gl: WebGL2RenderingContext, program: Program) => void) {
+        const {gl} = this.webgl;
+        fb = fb ?? this.webgl.drawToScreen();
+        fb.viewport();
+        program.run(() => {
+            if (fb.depth) {
+                gl.enable(gl.DEPTH_TEST);
+                gl.depthFunc(gl.LEQUAL); /* adjacent/overlapping tiles must overwrite cleanly */
+            } else {
+                gl.disable(gl.DEPTH_TEST);
+            }
+            draw(gl, program);
+            if (fb.depth) gl.disable(gl.DEPTH_TEST);
+        });
+    }
+
+    /* Clip rendering to the tile's visible world rect so halo geometry
+     * does not bleed into neighboring tiles. */
+    private scissorTile(tile: Tile) {
+        const {gl} = this.webgl;
+        const [x0, y0, w, h] = tile.rect;
+        const corners = [[x0, y0], [x0+w, y0], [x0, y0+h], [x0+w, y0+h]];
+        const v = vec4.create();
+        let minX = 1, maxX = -1, minY = 1, maxY = -1;
+        for (const [cx, cy] of corners) {
+            vec4.transformMat4(v, vec4.fromValues(cx, cy, 0, 1), this.projection);
+            if (v[0] < minX) minX = v[0];
+            if (v[0] > maxX) maxX = v[0];
+            if (v[1] < minY) minY = v[1];
+            if (v[1] > maxY) maxY = v[1];
+        }
+        const W = fbo_texture_size, H = fbo_texture_size;
+        const px = Math.floor((minX + 1) / 2 * W);
+        const py = Math.floor((minY + 1) / 2 * H);
+        const pw = Math.max(1, Math.ceil((maxX - minX) / 2 * W));
+        const ph = Math.max(1, Math.ceil((maxY - minY) / 2 * H));
+        gl.enable(gl.SCISSOR_TEST);
+        gl.scissor(px, py, pw, ph);
+    }
+
+    private endScissor() {
+        this.webgl.gl.disable(this.webgl.gl.SCISSOR_TEST);
+    }
+
+    /* Bind a tile's quad geometry (a_xy, a_em) + element buffer. */
+    private bindQuad(geo: TileGeo, program: Program) {
+        geo.gpu.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, this.webgl.gl.FLOAT, false, 0, 0);
+        geo.gpu.buffer_quad_em.vertexAttribPointer(program.a_em, 2, this.webgl.gl.FLOAT, false, 28, 0);
+        geo.gpu.buffer_quad_elements.bind();
+    }
+
+    private bindDrapeExtras(geo: TileGeo, program: Program) {
+        const {gl} = this.webgl;
+        geo.gpu.buffer_quad_em.vertexAttribPointer(program.a_country, 1, gl.FLOAT, false, 28, 8);
+        geo.gpu.buffer_quad_em.vertexAttribPointer(program.a_zone, 1, gl.FLOAT, false, 28, 12);
+        geo.gpu.buffer_quad_em.vertexAttribPointer(program.a_terrain, 1, gl.FLOAT, false, 28, 20);
+        geo.gpu.buffer_quad_em.vertexAttribPointer(program.a_terrainweight, 1, gl.FLOAT, false, 28, 24);
+    }
+
+    /* ---- per-tile draw passes ---- */
+
+    drawTileRivers(geo: TileGeo) {
+        if (geo.numRiverTriangles <= 0 || !geo.gpu) return;
+        this.drawGeneric(this.program_river, this.fbo_river, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            gl.blendEquation(gl.FUNC_ADD);
+            geo.gpu.buffer_river_xyww.vertexAttribPointer(program.a_xyww, 4, gl.FLOAT, false, 0, 0);
+            gl.drawArrays(gl.TRIANGLES, 0, 3 * geo.numRiverTriangles);
+        });
+    }
+
+    drawTileLand(geo: TileGeo, outline_water: number) {
+        if (!geo.gpu) return;
+        this.drawGeneric(this.program_land, this.fbo_land, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+            gl.uniform1f(program.u_outline_water, outline_water);
+            this.fbo_river.texture.activate(gl.TEXTURE0, program.u_water);
+            this.bindQuad(geo, program);
+            gl.drawElements(gl.TRIANGLES, geo.quad_elements_length, gl.UNSIGNED_INT, 0);
+        });
+    }
+
+    drawTileDepth(geo: TileGeo) {
+        if (!geo.gpu) return;
+        this.drawGeneric(this.program_depth, this.fbo_depth, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+            this.bindQuad(geo, program);
+            gl.drawElements(gl.TRIANGLES, geo.quad_elements_length, gl.UNSIGNED_INT, 0);
+        });
+    }
+
+    drawTileBorders(geo: TileGeo) {
+        if (geo.numBorderSegments <= 0 || !geo.gpu || !geo.gpu.buffer_border_xy) return;
+        this.drawGeneric(this.program_border, this.fbo_border, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            gl.blendEquation(gl.FUNC_ADD);
+            geo.gpu.buffer_border_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 12, 0);
+            geo.gpu.buffer_border_xy.vertexAttribPointer(program.a_w, 1, gl.FLOAT, false, 12, 8);
+            gl.drawArrays(gl.TRIANGLES, 0, 6 * geo.numBorderSegments);
+        });
+    }
+
+    drawTileRoads(geo: TileGeo) {
+        if (geo.numRoadSegments <= 0 || !geo.gpu || !geo.gpu.buffer_road_xy) return;
+        this.drawGeneric(this.program_road, this.fbo_road, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            gl.blendEquation(gl.FUNC_ADD);
+            geo.gpu.buffer_road_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
+            gl.drawArrays(gl.TRIANGLES, 0, 6 * geo.numRoadSegments);
+        });
+    }
+
+    drawTileDrape(geo: TileGeo, renderParam: any) {
+        if (!geo.gpu) return;
+        const light_angle_rad = Math.PI / 180 * (renderParam.light_angle_deg + renderParam.rotate_deg);
+        this.drawGeneric(this.program_drape, this.fbo_drape, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+            gl.uniform1f(program.u_world_size, this.world.worldSize);
+            gl.uniform2fv(program.u_light_angle, [Math.cos(light_angle_rad), Math.sin(light_angle_rad)]);
+            gl.uniform2fv(program.u_inverse_texture_size, [1.5 / this.fbo_drape.texture.width, 1.5 / this.fbo_drape.texture.height]);
+            gl.uniform1f(program.u_slope, renderParam.slope);
+            gl.uniform1f(program.u_flat, renderParam.flat);
+            gl.uniform1f(program.u_ambient, renderParam.ambient);
+            gl.uniform1f(program.u_overhead, renderParam.overhead);
+            gl.uniform1f(program.u_outline_depth, renderParam.outline_depth * 5 * renderParam.zoom);
+            gl.uniform1f(program.u_outline_coast, renderParam.outline_coast);
+            gl.uniform1f(program.u_outline_water, renderParam.outline_water);
+            gl.uniform1f(program.u_outline_strength, renderParam.outline_strength);
+            gl.uniform1f(program.u_outline_threshold, renderParam.outline_threshold / 1000);
+            gl.uniform1f(program.u_biome_colors, renderParam.biome_colors);
+            gl.uniform1f(program.u_country_strength, renderParam.country_strength);
+            gl.uniform1f(program.u_country_borders, renderParam.country_borders);
+            gl.uniform1f(program.u_city_mode, renderParam.city_mode ?? 0);
+            gl.uniform1f(program.u_road_strength, renderParam.road_strength ?? 0);
+
+            const u_countrypalette = program['u_countrypalette[0]'] ?? program.u_countrypalette;
+            if (u_countrypalette) gl.uniform3fv(u_countrypalette, this.countryPalette);
+            const u_citypalette = program['u_citypalette[0]'] ?? program.u_citypalette;
+            if (u_citypalette) gl.uniform3fv(u_citypalette, this.cityPalette);
+            const u_terrainpalette = program['u_terrainpalette[0]'] ?? program.u_terrainpalette;
+            if (u_terrainpalette) gl.uniform3fv(u_terrainpalette, this.terrainPalette);
+
+            this.texture_colormap.activate(gl.TEXTURE0, program.u_colormap);
+            this.fbo_land.texture.activate(gl.TEXTURE1, program.u_elevation);
+            this.fbo_river.texture.activate(gl.TEXTURE2, program.u_water);
+            this.fbo_depth.texture.activate(gl.TEXTURE3, program.u_depth);
+            this.fbo_border.texture.activate(gl.TEXTURE4, program.u_border);
+            this.fbo_road.texture.activate(gl.TEXTURE5, program.u_road);
+
+            this.bindQuad(geo, program);
+            this.bindDrapeExtras(geo, program);
+            gl.drawElements(gl.TRIANGLES, geo.quad_elements_length, gl.UNSIGNED_INT, 0);
+        });
+    }
+
+    drawTileBuildings(geo: TileGeo) {
+        if (geo.numBuildings <= 0 || !geo.gpu || !geo.gpu.buffer_buildings) return;
+        this.drawGeneric(this.program_building, this.fbo_drape, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+            geo.gpu.buffer_buildings.vertexAttribPointer(program.a_xyz, 3, gl.FLOAT, false, 24, 0);
+            geo.gpu.buffer_buildings.vertexAttribPointer(program.a_color, 3, gl.FLOAT, false, 24, 12);
+            gl.drawArrays(gl.TRIANGLES, 0, 30 * geo.numBuildings);
+        });
+    }
+
+    drawTileTrees(geo: TileGeo) {
+        if (geo.numTrees <= 0 || !geo.gpu || !geo.gpu.buffer_trees) return;
+        this.drawGeneric(this.program_tree, this.fbo_drape, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+            geo.gpu.buffer_trees.vertexAttribPointer(program.a_xyz, 3, gl.FLOAT, false, 24, 0);
+            geo.gpu.buffer_trees.vertexAttribPointer(program.a_color, 3, gl.FLOAT, false, 24, 12);
+            gl.drawArrays(gl.TRIANGLES, 0, 18 * geo.numTrees);
+        });
+    }
+
+    drawTileForestCanopies(geo: TileGeo) {
+        if (geo.numForestCanopies <= 0 || !geo.gpu || !geo.gpu.buffer_forest_canopies) return;
+        this.drawGeneric(this.program_forest_canopy, this.fbo_drape, (gl, program) => {
+            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+            geo.gpu.buffer_forest_canopies.vertexAttribPointer(program.a_xyz, 3, gl.FLOAT, false, 24, 0);
+            geo.gpu.buffer_forest_canopies.vertexAttribPointer(program.a_color, 3, gl.FLOAT, false, 24, 12);
+            gl.drawArrays(gl.TRIANGLES, 0, 18 * geo.numForestCanopies);
+        });
+    }
+
+    /* Draw the live brush preview: soft discs over the terrain, before
+     * buildings/trees. Drawn with blending into the drape framebuffer. */
+    drawPreviews() {
+        const list = Painting.preview;
+        if (!list || list.length === 0) return;
+        const n = Math.min(list.length, 64);
+        const worldSize = this.world.worldSize;
+        const P = this.a_preview;
+        let p = 0;
+        for (let i = 0; i < n; i++) {
+            const s = list[i];
+            const cx = s.x * worldSize, cy = s.y * worldSize, r = s.radius * worldSize;
+            for (const [ox, oy] of [[-1,-1],[1,-1],[1,1],[-1,-1],[1,1],[-1,1]]) {
+                P[p++] = cx; P[p++] = cy; P[p++] = r;
+                P[p++] = s.r; P[p++] = s.g; P[p++] = s.b;
+                P[p++] = ox; P[p++] = oy;
+            }
+        }
+        this.buffer_preview.subdata(0, P.subarray(0, p));
+        this.drawGeneric(this.program_preview, this.fbo_drape, (gl, program) => {
+            gl.disable(gl.DEPTH_TEST); /* hover above terrain regardless of depth */
+            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            gl.blendEquation(gl.FUNC_ADD);
+            this.buffer_preview.vertexAttribPointer(program.a_cx, 1, gl.FLOAT, false, 32, 0);
+            this.buffer_preview.vertexAttribPointer(program.a_cy, 1, gl.FLOAT, false, 32, 4);
+            this.buffer_preview.vertexAttribPointer(program.a_radius, 1, gl.FLOAT, false, 32, 8);
+            this.buffer_preview.vertexAttribPointer(program.a_color, 3, gl.FLOAT, false, 32, 12);
+            this.buffer_preview.vertexAttribPointer(program.a_off, 2, gl.FLOAT, false, 32, 24);
+            gl.drawArrays(gl.TRIANGLES, 0, 6 * n);
+            gl.enable(gl.DEPTH_TEST);
+        });
+    }
+
+    drawFinal(offset: [number, number]) {
+        this.drawGeneric(this.program_final, null, (gl, program) => {
+            gl.uniform2fv(program.u_offset, offset);
+            this.fbo_drape.texture.activate(gl.TEXTURE0, program.u_texture);
+            this.buffer_fullscreen.vertexAttribPointer(program.a_uv, 2, gl.FLOAT, false, 0, 0);
+            gl.drawArrays(gl.TRIANGLES, 0, 3);
+        });
+    }
+
+    /* ---- country labels ---- */
+
+    accumulateCountryCenters(geo: TileGeo) {
+        const {mesh} = geo;
         for (let r = 0; r < mesh.numSolidRegions; r++) {
-            const c = this.a_quad_em[7*r + 2];
+            const c = geo.a_quad_em[7*r + 2];
             if (c >= 0 && c < NUM_COUNTRIES) {
-                counts[c]++;
+                this.countryCount[c]++;
                 this.countrySumX[c] += mesh.x_of_r(r);
                 this.countrySumY[c] += mesh.y_of_r(r);
             }
         }
+    }
+
+    computeCountryCenters() {
         for (let c = 0; c < NUM_COUNTRIES; c++) {
-            if (counts[c] > 0) {
-                this.countryCenterX[c] = this.countrySumX[c] / counts[c];
-                this.countryCenterY[c] = this.countrySumY[c] / counts[c];
+            if (this.countryCount[c] > 0) {
+                this.countryCenterX[c] = this.countrySumX[c] / this.countryCount[c];
+                this.countryCenterY[c] = this.countrySumY[c] / this.countryCount[c];
             } else {
                 this.countryCenterX[c] = NaN;
                 this.countryCenterY[c] = NaN;
             }
         }
+        this.countrySumX.fill(0);
+        this.countrySumY.fill(0);
+        this.countryCount.fill(0);
         this.reconcileLabels();
     }
 
-    /* Names come from the painting UI; show a label only for countries
-     * that both have a name and are painted on the map. */
     setCountryNames(names: string[]) {
         this.countryNames = names.slice();
         this.reconcileLabels();
@@ -885,7 +1215,6 @@ export default class Renderer {
         }
     }
 
-    /* Move each visible label to its country's centroid in screen space. */
     updateLabelPositions() {
         const layer = this.labelLayer;
         const W = layer.clientWidth, H = layer.clientHeight;
@@ -905,168 +1234,9 @@ export default class Renderer {
         let size = canvas.clientWidth;
         size = 2048; /* could be smaller to increase performance */
         if (canvas.width !== size || canvas.height !== size) {
-            console.log(`Resizing canvas from ${canvas.width}x${canvas.height} to ${size}x${size}`);
             canvas.width = canvas.height = size;
             this.webgl.gl.viewport(0, 0, canvas.width, canvas.height);
         }
-    }
-
-    /* wrapper function to make the other drawing functions more convenient */
-    drawGeneric(program: Program, fb: Framebuffer | null, draw: (gl: WebGL2RenderingContext, program: Program) => void) {
-        const {gl} = this.webgl;
-        fb = fb ?? this.webgl.drawToScreen();
-        fb.viewport();
-        program.run(() => {
-            if (fb.depth) gl.enable(gl.DEPTH_TEST); else gl.disable(gl.DEPTH_TEST);
-            draw(gl, program);
-            if (fb.depth) gl.disable(gl.DEPTH_TEST);
-        });
-    }
-
-    drawRivers() {
-        this.drawGeneric(this.program_river, this.fbo_river, (gl, program) => {
-            gl.uniformMatrix4fv(program.u_projection, false, this.topdown);
-
-            gl.enable(gl.BLEND);
-            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-            gl.blendEquation(gl.FUNC_ADD);
-
-            gl.drawArrays(gl.TRIANGLES, 0, 3 * this.numRiverTriangles);
-        });
-    }
-
-    drawBorders() {
-        this.drawGeneric(this.program_border, this.fbo_border, (gl, program) => {
-            gl.uniformMatrix4fv(program.u_projection, false, this.topdown);
-
-            gl.enable(gl.BLEND);
-            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-            gl.blendEquation(gl.FUNC_ADD);
-
-            gl.drawArrays(gl.TRIANGLES, 0, 6 * this.numBorderSegments);
-        });
-    }
-
-    drawRoads() {
-        this.drawGeneric(this.program_road, this.fbo_road, (gl, program) => {
-            gl.uniformMatrix4fv(program.u_projection, false, this.topdown);
-
-            gl.enable(gl.BLEND);
-            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-            gl.blendEquation(gl.FUNC_ADD);
-
-            gl.drawArrays(gl.TRIANGLES, 0, 6 * this.numRoadSegments);
-        });
-    }
-
-    /* Draw 3D building boxes into the drape framebuffer after the
-     * terrain, using the same projection + depth so they sit on the
-     * ground and occlude each other correctly. */
-    drawBuildings() {
-        this.drawGeneric(this.program_building, this.fbo_drape, (gl, program) => {
-            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
-
-            gl.drawArrays(gl.TRIANGLES, 0, 30 * this.numBuildings);
-        });
-    }
-
-    drawTrees() {
-        this.drawGeneric(this.program_tree, this.fbo_drape, (gl, program) => {
-            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
-
-            gl.drawArrays(gl.TRIANGLES, 0, 18 * this.numTrees);
-        });
-    }
-
-    /* Draw the flat forest canopy discs into the drape framebuffer.
-     * They lie at the terrain elevation so the forest reads as a
-     * satellite-style mottled canopy rather than a flat color. */
-    drawForestCanopies() {
-        this.drawGeneric(this.program_forest_canopy, this.fbo_drape, (gl, program) => {
-            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
-
-            gl.drawArrays(gl.TRIANGLES, 0, 18 * this.numForestCanopies);
-        });
-    }
-
-    /* Regenerate the tree geometry (used when the map changes and when
-     * the tree_density slider moves). */
-    updateTrees() {
-        this.numTrees = Geometry.setTreeGeometry(this.mesh, this.a_quad_em, this.a_trees, this.treeDensity);
-        this.buffer_trees.subdata(0, this.a_trees.subarray(0, 108 * this.numTrees));
-    }
-
-    /* Regenerate the forest canopy discs whenever the map changes. */
-    updateForestCanopies() {
-        this.numForestCanopies = Geometry.setForestCanopyGeometry(this.mesh, this.a_quad_em, this.a_forest_canopies);
-        this.buffer_forest_canopies.subdata(0, this.a_forest_canopies.subarray(0, 108 * this.numForestCanopies));
-    }
-
-    drawLand(outline_water: number) {
-        this.drawGeneric(this.program_land, this.fbo_land, (gl, program) => {
-            gl.uniformMatrix4fv(program.u_projection, false, this.topdown);
-            gl.uniform1f(program.u_outline_water, outline_water);
-            this.fbo_river.texture.activate(gl.TEXTURE0, program.u_water);
-
-            gl.drawElements(gl.TRIANGLES, this.quad_elements_length, gl.UNSIGNED_INT, 0);
-        });
-    }
-
-    drawDepth() {
-        this.drawGeneric(this.program_depth, this.fbo_depth, (gl, program) => {
-            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
-
-            gl.drawElements(gl.TRIANGLES, this.quad_elements_length, gl.UNSIGNED_INT, 0);
-        });
-    }
-
-    drawDrape(renderParam: any) {
-        const light_angle_rad = Math.PI / 180 * (renderParam.light_angle_deg + renderParam.rotate_deg);
-        this.drawGeneric(this.program_drape, this.fbo_drape, (gl, program) => {
-            gl.uniformMatrix4fv(program.u_projection, false, this.projection);
-            gl.uniform2fv(program.u_light_angle, [Math.cos(light_angle_rad), Math.sin(light_angle_rad)]);
-            gl.uniform2fv(program.u_inverse_texture_size, [1.5 / this.fbo_drape.texture.width, 1.5 / this.fbo_drape.texture.height]);
-            gl.uniform1f(program.u_slope, renderParam.slope);
-            gl.uniform1f(program.u_flat, renderParam.flat);
-            gl.uniform1f(program.u_ambient, renderParam.ambient);
-            gl.uniform1f(program.u_overhead, renderParam.overhead);
-            gl.uniform1f(program.u_outline_depth, renderParam.outline_depth * 5 * renderParam.zoom);
-            gl.uniform1f(program.u_outline_coast, renderParam.outline_coast);
-            gl.uniform1f(program.u_outline_water, renderParam.outline_water);
-            gl.uniform1f(program.u_outline_strength, renderParam.outline_strength);
-            gl.uniform1f(program.u_outline_threshold, renderParam.outline_threshold / 1000);
-            gl.uniform1f(program.u_biome_colors, renderParam.biome_colors);
-            gl.uniform1f(program.u_country_strength, renderParam.country_strength);
-            gl.uniform1f(program.u_country_borders, renderParam.country_borders);
-            gl.uniform1f(program.u_city_mode, renderParam.city_mode ?? 0);
-            gl.uniform1f(program.u_road_strength, renderParam.road_strength ?? 0);
-
-            /* uniform arrays are reflected as "u_countrypalette[0]" */
-            const u_countrypalette = program['u_countrypalette[0]'] ?? program.u_countrypalette;
-            if (u_countrypalette) gl.uniform3fv(u_countrypalette, this.countryPalette);
-            const u_citypalette = program['u_citypalette[0]'] ?? program.u_citypalette;
-            if (u_citypalette) gl.uniform3fv(u_citypalette, this.cityPalette);
-            const u_terrainpalette = program['u_terrainpalette[0]'] ?? program.u_terrainpalette;
-            if (u_terrainpalette) gl.uniform3fv(u_terrainpalette, this.terrainPalette);
-
-            this.texture_colormap.activate(gl.TEXTURE0, program.u_colormap);
-            this.fbo_land.texture.activate(gl.TEXTURE1, program.u_elevation);
-            this.fbo_river.texture.activate(gl.TEXTURE2, program.u_water);
-            this.fbo_depth.texture.activate(gl.TEXTURE3, program.u_depth);
-            this.fbo_border.texture.activate(gl.TEXTURE4, program.u_border);
-            this.fbo_road.texture.activate(gl.TEXTURE5, program.u_road);
-
-            gl.drawElements(gl.TRIANGLES, this.quad_elements_length, gl.UNSIGNED_INT, 0);
-        });
-    }
-
-    drawFinal(offset: [number, number]) {
-        this.drawGeneric(this.program_final, null, (gl, program) => {
-            gl.uniform2fv(program.u_offset, offset);
-            this.fbo_drape.texture.activate(gl.TEXTURE0, program.u_texture);
-
-            gl.drawArrays(gl.TRIANGLES, 0, 3);
-        });
     }
 
     startDrawingLoop() {
@@ -1081,68 +1251,139 @@ export default class Renderer {
             gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         };
 
-        /* Only draw when render parameters have been passed in;
-         * otherwise skip the render and wait for the next tick */
         clearBuffers();
         const renderLoop = () => {
             requestAnimationFrame(renderLoop);
             const renderParam = this.renderParam;
             if (!renderParam) { return; }
             this.renderParam = undefined;
+            if (this.continuous) this.renderParam = this.lastRender; // keep rendering for benchmarks
 
-            if (this.numRiverTriangles > 0) {
-                this.drawRivers();
-            }
-
-            this.drawLand(renderParam.outline_water);
+            const frameStart = performance.now();
 
             /* Standard rotation for orthographic view */
             mat4.identity(this.projection);
             mat4.rotateX(this.projection, this.projection, (180 + renderParam.tilt_deg) * Math.PI/180);
             mat4.rotateZ(this.projection, this.projection, renderParam.rotate_deg * Math.PI/180);
 
-            /* Top-down oblique copies column 2 (y input) to row 3 (z
-             * output). Typical matrix libraries such as glm's mat4 or
-             * Unity's Matrix4x4 or Unreal's FMatrix don't have this
-             * this.projection built-in. For mapgen4 I merge orthographic
-             * (which will *move* part of y-input to z-output) and
-             * top-down oblique (which will *copy* y-input to z-output).
-             * <https://en.wikipedia.org/wiki/Oblique_projection> */
+            /* Top-down oblique: copy column 2 (y input) to row 3 (z output). */
             this.projection[9] = 1;
 
-            /* Scale and translate works on the hybrid this.projection */
             mat4.scale(this.projection, this.projection, [renderParam.zoom/100, renderParam.zoom/100, renderParam.mountain_height * renderParam.zoom/100]);
             mat4.translate(this.projection, this.projection, [-renderParam.x, -renderParam.y, 0]);
 
-            /* Keep track of the inverse matrix for mapping mouse to world coordinates */
             mat4.invert(this.inverse_projection, this.projection);
 
+            /* Visible world rect, computed from the projected corners. */
+            const v = vec4.create();
+            const corners = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
+            let wx0 = Infinity, wy0 = Infinity, wx1 = -Infinity, wy1 = -Infinity;
+            for (const [cx, cy] of corners) {
+                vec4.transformMat4(v, vec4.fromValues(cx, cy, 0, 1), this.inverse_projection);
+                if (v[0] < wx0) wx0 = v[0];
+                if (v[0] > wx1) wx1 = v[0];
+                if (v[1] < wy0) wy0 = v[1];
+                if (v[1] > wy1) wy1 = v[1];
+            }
+            const viewRect: [number, number, number, number] = [wx0, wy0, wx1 - wx0, wy1 - wy0];
+
+            /* Select LOD + cull, request missing tiles. */
+            const tiles = this.world.update(renderParam.zoom, viewRect);
+
+            /* Upload dirty tiles and count visible cells for benchmarks. */
+            let visibleCells = 0;
+            for (const tile of tiles) {
+                const geo = this.tileGeo.get(tile.key);
+                if (!geo) continue;
+                if (geo.dirty) this.uploadTile(geo);
+                visibleCells += geo.mesh.numSolidRegions;
+            }
+
+            clearBuffers();
+
+            for (const tile of tiles) {
+                const geo = this.tileGeo.get(tile.key);
+                if (!geo) continue;
+                this.scissorTile(tile);
+                this.drawTileRivers(geo);
+                this.endScissor();
+            }
+            for (const tile of tiles) {
+                const geo = this.tileGeo.get(tile.key);
+                if (!geo) continue;
+                this.scissorTile(tile);
+                this.drawTileLand(geo, renderParam.outline_water);
+                this.endScissor();
+            }
             if (renderParam.outline_depth > 0) {
-                this.drawDepth();
+                for (const tile of tiles) {
+                    const geo = this.tileGeo.get(tile.key);
+                    if (!geo) continue;
+                    this.scissorTile(tile);
+                    this.drawTileDepth(geo);
+                    this.endScissor();
+                }
+            }
+            for (const tile of tiles) {
+                const geo = this.tileGeo.get(tile.key);
+                if (!geo) continue;
+                this.scissorTile(tile);
+                this.drawTileBorders(geo);
+                this.endScissor();
+            }
+            for (const tile of tiles) {
+                const geo = this.tileGeo.get(tile.key);
+                if (!geo) continue;
+                this.scissorTile(tile);
+                this.drawTileRoads(geo);
+                this.endScissor();
+            }
+            for (const tile of tiles) {
+                const geo = this.tileGeo.get(tile.key);
+                if (!geo) continue;
+                this.scissorTile(tile);
+                this.drawTileDrape(geo, renderParam);
+                this.endScissor();
+            }
+            for (const tile of tiles) {
+                const geo = this.tileGeo.get(tile.key);
+                if (!geo) continue;
+                this.scissorTile(tile);
+                this.drawTileForestCanopies(geo);
+                this.endScissor();
+            }
+            if (renderParam.city_mode > 0) {
+                for (const tile of tiles) {
+                    const geo = this.tileGeo.get(tile.key);
+                    if (!geo) continue;
+                    this.scissorTile(tile);
+                    this.drawTileBuildings(geo);
+                    this.endScissor();
+                }
+                for (const tile of tiles) {
+                    const geo = this.tileGeo.get(tile.key);
+                    if (!geo) continue;
+                    this.scissorTile(tile);
+                    this.drawTileTrees(geo);
+                    this.endScissor();
+                }
             }
 
-            if (this.numBorderSegments > 0) {
-                this.drawBorders();
+            /* Country labels from the union of visible tiles. */
+            this.countrySumX.fill(0);
+            this.countrySumY.fill(0);
+            this.countryCount.fill(0);
+            for (const tile of tiles) {
+                const geo = this.tileGeo.get(tile.key);
+                if (geo) this.accumulateCountryCenters(geo);
             }
+            this.computeCountryCenters();
 
-            if (this.numRoadSegments > 0) {
-                this.drawRoads();
+            /* live brush preview (instant feedback while painting) */
+            this.drawPreviews();
+            if (this.bench) {
+                this.bench.visibleCells += Painting.preview.length * 100; // account for overlay (rough)
             }
-
-            this.drawDrape(renderParam);
-
-            if (this.numForestCanopies > 0) {
-                this.drawForestCanopies();
-            }
-
-            if (this.numBuildings > 0 && renderParam.city_mode > 0) {
-                this.drawBuildings();
-            }
-
-            if (this.numTrees > 0 && renderParam.city_mode > 0) {
-                this.drawTrees();
-            }
-
             /* Draw the final texture to the canvas; this slightly blurs the outlines */
             this.drawFinal([0.5 / fbo_texture_size, 0.5 / fbo_texture_size]);
 
@@ -1155,7 +1396,6 @@ export default class Renderer {
                 const buffer = new Uint8Array(bytesPerRow * this.screenshotCanvas.height);
                 gl.readPixels(0, 0, this.screenshotCanvas.width, this.screenshotCanvas.height, gl.RGBA, gl.UNSIGNED_BYTE, buffer);
 
-                /* Flip row order from WebGL to Canvas */
                 for (let y = 0; y < this.screenshotCanvas.height; y++) {
                     const rowBuffer = new Uint8Array(buffer.buffer, y * bytesPerRow, bytesPerRow);
                     imageData.data.set(rowBuffer, (this.screenshotCanvas.height-y-1) * bytesPerRow);
@@ -1167,18 +1407,33 @@ export default class Renderer {
             }
 
             clearBuffers();
+
+            if (this.bench) {
+                this.bench.renderMs = performance.now() - frameStart;
+                this.bench.visibleCells = visibleCells;
+                this.bench.fpsTick();
+            }
         };
 
         renderLoop();
     }
 
+    bench: any = null;
+    continuous: boolean = false;
+    lastRender: any = null;
+
     updateView(renderParam: any) {
         this.renderParam = renderParam;
+        this.lastRender = renderParam;
+        /* enable continuous rendering (for benchmarks/fps) when requested */
+        if (renderParam && this.bench) this.continuous = !!this.bench.enabled;
         /* the tree density slider only redraws; rebuild the tree
          * geometry when it changes */
         if (renderParam && this.treeDensity !== (renderParam.tree_density ?? 1)) {
             this.treeDensity = renderParam.tree_density ?? 1;
-            this.updateTrees();
+            for (const tile of this.world.tiles.values()) {
+                this.updateTileTrees(tile);
+            }
         }
     }
 }
