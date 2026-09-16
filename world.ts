@@ -31,7 +31,8 @@ const CANVAS_SIZE = 2048;
 export class WorldManager {
     tiles = new Map<TileKey, Tile>();
 
-    worldSize: number;
+    worldWidth: number;
+    worldHeight: number;
     baseSpacing: number;
     mountainSpacing: number;
     meshSeed: number;
@@ -54,7 +55,8 @@ export class WorldManager {
     private frame = 0;
 
     constructor(cfg: any) {
-        this.worldSize = cfg.world.size;
+        this.worldWidth = cfg.world.width ?? cfg.world.size ?? 1000;
+        this.worldHeight = cfg.world.height ?? cfg.world.size ?? 1000;
         this.baseSpacing = cfg.world.baseSpacing;
         this.mountainSpacing = cfg.world.mountainSpacing ?? cfg.mountainSpacing;
         this.meshSeed = cfg.mesh.seed;
@@ -69,11 +71,12 @@ export class WorldManager {
         this.zoomNative = 200 * cfg.lod.targetPixelsPerCell / (CANVAS_SIZE * cfg.world.baseSpacing);
     }
 
-    get nativeTileSize(): number { return this.worldSize / this.baseTilesPerAxis; }
+    get nativeTileSize(): number { return this.worldWidth / this.baseTilesPerAxis; }
 
     tileSize(level: number): number { return this.nativeTileSize * Math.pow(this.spacingFactor, -level); }
     spacing(level: number): number { return this.baseSpacing * Math.pow(this.spacingFactor, -level); }
-    grid(level: number): number { return Math.max(1, Math.round(this.worldSize / this.tileSize(level))); }
+    gridX(level: number): number { return Math.max(1, Math.round(this.worldWidth / this.tileSize(level))); }
+    gridY(level: number): number { return Math.max(1, Math.round(this.worldHeight / this.tileSize(level))); }
     cellsPerTile(level: number): number {
         const s = this.tileSize(level) / this.spacing(level);
         return s * s;
@@ -151,11 +154,12 @@ export class WorldManager {
     }
 
     private countVisibleTiles(level: number, viewRect: WorldRect): number {
-        const ts = this.tileSize(level), grid = this.grid(level);
+        const ts = this.tileSize(level);
+        const gx = this.gridX(level), gy = this.gridY(level);
         const tx0 = Math.max(0, Math.floor(viewRect[0] / ts));
         const ty0 = Math.max(0, Math.floor(viewRect[1] / ts));
-        const tx1 = Math.min(grid - 1, Math.floor((viewRect[0] + viewRect[2]) / ts));
-        const ty1 = Math.min(grid - 1, Math.floor((viewRect[1] + viewRect[3]) / ts));
+        const tx1 = Math.min(gx - 1, Math.floor((viewRect[0] + viewRect[2]) / ts));
+        const ty1 = Math.min(gy - 1, Math.floor((viewRect[1] + viewRect[3]) / ts));
         return Math.max(0, tx1 - tx0 + 1) * Math.max(0, ty1 - ty0 + 1);
     }
 
@@ -187,11 +191,12 @@ export class WorldManager {
             level--;
         }
 
-        const ts = this.tileSize(level), grid = this.grid(level);
+        const ts = this.tileSize(level);
+        const gx = this.gridX(level), gy = this.gridY(level);
         const tx0 = Math.max(0, Math.floor(viewRect[0] / ts));
         const ty0 = Math.max(0, Math.floor(viewRect[1] / ts));
-        const tx1 = Math.min(grid - 1, Math.floor((viewRect[0] + viewRect[2]) / ts));
-        const ty1 = Math.min(grid - 1, Math.floor((viewRect[1] + viewRect[3]) / ts));
+        const tx1 = Math.min(gx - 1, Math.floor((viewRect[0] + viewRect[2]) / ts));
+        const ty1 = Math.min(gy - 1, Math.floor((viewRect[1] + viewRect[3]) / ts));
 
         const wanted: [number, number][] = [];
         for (let ty = ty0; ty <= ty1; ty++) {

@@ -23,12 +23,15 @@ export default {
      * (= native detail scale). Zoom out uses negative levels (coarse),
      * zoom in uses positive levels (fine, real extra detail). */
     world: {
-        size: 4000,          /* world edge length in model units (4x4 = 16x area) */
+        width: 4000,         /* world width in model units (4x the original) */
+        height: 2000,        /* world height (2x the original) — world is 2:1 */
         baseSpacing: 5.5,    /* LOD 0 spacing = native detail scale */
         mountainSpacing: 35,
-        baseTilesPerAxis: 4, /* LOD 0 tiles per axis; LOD L: baseTilesPerAxis*2^L */
+        baseTilesPerAxis: 4, /* LOD 0 tiles per X axis; LOD L: baseTilesPerAxis*2^L */
         maxTiles: 24,        /* LRU cache size (each tile ~30k cells) */
         maxWorkers: 4,       /* parallel generation workers (tiles are distributed round-robin) */
+        paintCanvasSize: 512,/* painting constraint canvas width; the height is derived from the
+                                world aspect so brushes keep the same geographic scale */
     },
     lod: {
         minLevel: -2,        /* coarsest spacing (22 at level -2) */

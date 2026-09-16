@@ -332,7 +332,7 @@ const frag_depth = `
 const vert_drape = `
     precision highp float;
     uniform mat4 u_projection;
-    uniform float u_world_size;
+    uniform vec2 u_world_size;
     in vec2 a_xy;
     in vec2 a_em;
     in float a_country;
@@ -351,7 +351,7 @@ const vert_drape = `
         v_zone = a_zone;
         v_terrain = a_terrain;
         v_terrainweight = a_terrainweight;
-        vec2 xy_clamped = clamp(a_xy, vec2(0.0, 0.0), vec2(u_world_size, u_world_size));
+        vec2 xy_clamped = clamp(a_xy, vec2(0.0, 0.0), u_world_size);
         v_z = max(0.0, a_em.x); // oceans with e<0 still rendered at z=0
         if (xy_clamped != a_xy) { // boundary points
             v_z = -0.5;
@@ -596,7 +596,10 @@ const frag_preview = `
 //////////////////////////////////////////////////////////////////////
 // Per-tile geometry + GPU buffers
 
-const fbo_texture_size: number = 2048;
+/* Render resolution. Matches the world aspect (2:1) so the map fills the
+ * viewport naturally — no letterboxing, no distortion. */
+const fbo_texture_width: number = 2048;
+const fbo_texture_height: number = 1024;
 
 type TileGeo = {
     mesh: Mesh;
@@ -732,12 +735,12 @@ export default class Renderer {
 
         this.texture_colormap = this.webgl.createTexture({data: colormap.data, width: colormap.width, height: colormap.height, filter: 'nearest'});
 
-        this.fbo_land  = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, internalFormat: this.webgl.gl.R16F, filter: 'linear'});
-        this.fbo_depth = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: true, internalFormat: this.webgl.gl.R16F, filter: 'nearest'});
-        this.fbo_river = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, filter: 'linear'});
-        this.fbo_drape = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: true, filter: 'linear'});
-        this.fbo_border = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, filter: 'linear'});
-        this.fbo_road = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, filter: 'linear'});
+        this.fbo_land  = this.webgl.createFramebuffer(fbo_texture_width, fbo_texture_height, {depth: false, internalFormat: this.webgl.gl.R16F, filter: 'linear'});
+        this.fbo_depth = this.webgl.createFramebuffer(fbo_texture_width, fbo_texture_height, {depth: true, internalFormat: this.webgl.gl.R16F, filter: 'nearest'});
+        this.fbo_river = this.webgl.createFramebuffer(fbo_texture_width, fbo_texture_height, {depth: false, filter: 'linear'});
+        this.fbo_drape = this.webgl.createFramebuffer(fbo_texture_width, fbo_texture_height, {depth: true, filter: 'linear'});
+        this.fbo_border = this.webgl.createFramebuffer(fbo_texture_width, fbo_texture_height, {depth: false, filter: 'linear'});
+        this.fbo_road = this.webgl.createFramebuffer(fbo_texture_width, fbo_texture_height, {depth: false, filter: 'linear'});
 
         this.program_river = this.webgl.createProgram('river', vert_river, frag_river);
         this.program_land  = this.webgl.createProgram('land', vert_land, frag_land);
@@ -752,8 +755,8 @@ export default class Renderer {
         this.program_preview = this.webgl.createProgram('preview', vert_preview, frag_preview);
 
         this.screenshotCanvas = document.createElement('canvas');
-        this.screenshotCanvas.width = fbo_texture_size;
-        this.screenshotCanvas.height = fbo_texture_size;
+        this.screenshotCanvas.width = fbo_texture_width;
+        this.screenshotCanvas.height = fbo_texture_height;
         this.screenshotCallback = null;
 
         /* Country name labels overlaid on the map (DOM, repositioned
@@ -958,7 +961,7 @@ export default class Renderer {
             if (v[1] < minY) minY = v[1];
             if (v[1] > maxY) maxY = v[1];
         }
-        const W = fbo_texture_size, H = fbo_texture_size;
+        const W = fbo_texture_width, H = fbo_texture_height;
         const px = Math.floor((minX + 1) / 2 * W);
         const py = Math.floor((minY + 1) / 2 * H);
         const pw = Math.max(1, Math.ceil((maxX - minX) / 2 * W));
@@ -1050,7 +1053,7 @@ export default class Renderer {
         const light_angle_rad = Math.PI / 180 * (renderParam.light_angle_deg + renderParam.rotate_deg);
         this.drawGeneric(this.program_drape, this.fbo_drape, (gl, program) => {
             gl.uniformMatrix4fv(program.u_projection, false, this.projection);
-            gl.uniform1f(program.u_world_size, this.world.worldSize);
+            gl.uniform2f(program.u_world_size, this.world.worldWidth, this.world.worldHeight);
             gl.uniform2fv(program.u_light_angle, [Math.cos(light_angle_rad), Math.sin(light_angle_rad)]);
             gl.uniform2fv(program.u_inverse_texture_size, [1.5 / this.fbo_drape.texture.width, 1.5 / this.fbo_drape.texture.height]);
             gl.uniform1f(program.u_slope, renderParam.slope);
@@ -1124,12 +1127,12 @@ export default class Renderer {
         const list = Painting.preview;
         if (!list || list.length === 0) return;
         const n = Math.min(list.length, 64);
-        const worldSize = this.world.worldSize;
+        const worldW = this.world.worldWidth, worldH = this.world.worldHeight;
         const P = this.a_preview;
         let p = 0;
         for (let i = 0; i < n; i++) {
             const s = list[i];
-            const cx = s.x * worldSize, cy = s.y * worldSize, r = s.radius * worldSize;
+            const cx = s.x * worldW, cy = s.y * worldH, r = s.radius * worldW;
             for (const [ox, oy] of [[-1,-1],[1,-1],[1,1],[-1,-1],[1,1],[-1,1]]) {
                 P[p++] = cx; P[p++] = cy; P[p++] = r;
                 P[p++] = s.r; P[p++] = s.g; P[p++] = s.b;
@@ -1231,10 +1234,10 @@ export default class Renderer {
     /* Allow drawing at a different resolution than the internal texture size */
     resizeCanvas() {
         let canvas = document.getElementById('mapgen4') as HTMLCanvasElement;
-        let size = canvas.clientWidth;
-        size = 2048; /* could be smaller to increase performance */
-        if (canvas.width !== size || canvas.height !== size) {
-            canvas.width = canvas.height = size;
+        const w = fbo_texture_width, h = fbo_texture_height;
+        if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
             this.webgl.gl.viewport(0, 0, canvas.width, canvas.height);
         }
     }
@@ -1269,7 +1272,17 @@ export default class Renderer {
             /* Top-down oblique: copy column 2 (y input) to row 3 (z output). */
             this.projection[9] = 1;
 
-            mat4.scale(this.projection, this.projection, [renderParam.zoom/100, renderParam.zoom/100, renderParam.mountain_height * renderParam.zoom/100]);
+            /* Uniform world scale in x, but y is scaled by the inverse of the
+             * canvas aspect so the visible world region matches the 2:1
+             * viewport — the map displays at its true geographic aspect
+             * instead of being squashed. z (mountain height) uses the
+             * standard formula `mountain_height * zoom`: the automatic
+             * mountain_height compensation across zoom levels is applied in
+             * mapgen4.ts (the mountain_height slider value is rescaled by
+             * refZoom/zoom), keeping the displayed mountains consistent. */
+            const aspectFactor = fbo_texture_width / fbo_texture_height;
+            const yScale = renderParam.zoom/100 * aspectFactor;
+            mat4.scale(this.projection, this.projection, [renderParam.zoom/100, yScale, renderParam.mountain_height * renderParam.zoom/100 * aspectFactor]);
             mat4.translate(this.projection, this.projection, [-renderParam.x, -renderParam.y, 0]);
 
             mat4.invert(this.inverse_projection, this.projection);
@@ -1385,7 +1398,7 @@ export default class Renderer {
                 this.bench.visibleCells += Painting.preview.length * 100; // account for overlay (rough)
             }
             /* Draw the final texture to the canvas; this slightly blurs the outlines */
-            this.drawFinal([0.5 / fbo_texture_size, 0.5 / fbo_texture_size]);
+            this.drawFinal([0.5 / fbo_texture_width, 0.5 / fbo_texture_height]);
 
             this.updateLabelPositions();
 

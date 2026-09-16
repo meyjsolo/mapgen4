@@ -19,7 +19,7 @@ import type {Mesh} from "./types.d.ts";
 const worker: Worker = self as any;
 
 // worker-side configuration and caches
-let worldSize = 4000, baseSpacing = 5.5, mountainSpacing = 35, meshSeed = 12345;
+let worldWidth = 4000, worldHeight = 2000, baseSpacing = 5.5, mountainSpacing = 35, meshSeed = 12345;
 let spacingFactor = 2, riverFlowExponent = 2;
 let mountainPeaks: Float32Array = new Float32Array(0);
 // meshKey ("lod|tx|ty") -> {mesh, t_peaks}
@@ -31,13 +31,14 @@ const mapKey = (scene: string, lod: number, tx: number, ty: number) => `${scene}
 
 function handleInit(event) {
     const d = event.data;
-    worldSize = d.world?.size ?? worldSize;
+    worldWidth = d.world?.width ?? d.world?.size ?? worldWidth;
+    worldHeight = d.world?.height ?? d.world?.size ?? worldHeight;
     baseSpacing = d.world?.baseSpacing ?? baseSpacing;
     mountainSpacing = d.world?.mountainSpacing ?? mountainSpacing;
     meshSeed = d.meshSeed ?? meshSeed;
     spacingFactor = d.lod?.spacingFactor ?? spacingFactor;
     riverFlowExponent = d.lod?.riverFlowExponent ?? riverFlowExponent;
-    mountainPeaks = generateMountainPeaks(meshSeed, mountainSpacing, worldSize);
+    mountainPeaks = generateMountainPeaks(meshSeed, mountainSpacing, worldWidth, worldHeight);
     worker.postMessage({type: 'initDone'});
 }
 
@@ -69,11 +70,11 @@ function handleGenTile(event) {
 
     const start_time = performance.now();
 
-    map.assignCountries(constraints.country, constraints.size);
+    map.assignCountries(constraints.country, constraints.sizeW, constraints.sizeH);
     map.assignElevation(param.elevation, constraints);
-    map.assignCity(constraints.city, constraints.size);
-    map.assignObjects(constraints.objects, constraints.size);
-    map.assignTerrain(constraints.terrain, constraints.size);
+    map.assignCity(constraints.city, constraints.sizeW, constraints.sizeH);
+    map.assignObjects(constraints.objects, constraints.sizeW, constraints.sizeH);
+    map.assignTerrain(constraints.terrain, constraints.sizeW, constraints.sizeH);
     map.assignRainfall(param.biomes);
 
     // River threshold layering: flow accumulates as 1/spacing^2, so the

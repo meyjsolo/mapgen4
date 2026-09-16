@@ -20,16 +20,22 @@ import {
     OBJ_NONE, OBJ_ROAD, OBJ_BUILDING, OBJ_TREE,
 } from "./city.ts";
 import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, TERRAIN_FOREST, TERRAIN_DESERT, NUM_TERRAINS, terrainPalette} from "./terrains.ts";
+import param from "./config.js";
 
-const CANVAS_SIZE = 128;
+/* Painting canvas resolution. The width scales with the world so brushes
+ * keep the same geographic scale as the original mapgen4 (128 for a 1000
+ * unit world); the height follows the world's aspect ratio. */
+const CANVAS_WIDTH = param.world.paintCanvasSize ?? 128;
+const CANVAS_HEIGHT = Math.max(1, Math.round(CANVAS_WIDTH * (param.world.height ?? param.world.size ?? 1000) / (param.world.width ?? param.world.size ?? 1000)));
+const CANVAS_SIZE = CANVAS_WIDTH * CANVAS_HEIGHT;
 
 const currentStroke = {
     /* elevation before the current paint stroke began */
-    previousElevation: new Float32Array(CANVAS_SIZE * CANVAS_SIZE),
+    previousElevation: new Float32Array(CANVAS_SIZE),
     /* how long, in milliseconds, was spent painting */
-    time: new Float32Array(CANVAS_SIZE * CANVAS_SIZE),
+    time: new Float32Array(CANVAS_SIZE),
     /* maximum strength applied */
-    strength: new Float32Array(CANVAS_SIZE * CANVAS_SIZE),
+    strength: new Float32Array(CANVAS_SIZE),
 };
 
 
@@ -49,15 +55,15 @@ class Generator {
     terrainHasPainted = false;
     
     constructor () {
-        this.elevation = new Float32Array(CANVAS_SIZE * CANVAS_SIZE);
+        this.elevation = new Float32Array(CANVAS_SIZE);
         // -1 means "no country"; otherwise a country palette index
-        this.country = new Float32Array(CANVAS_SIZE * CANVAS_SIZE).fill(-1);
+        this.country = new Float32Array(CANVAS_SIZE).fill(-1);
         // -1 means "not painted"; otherwise a city zone index
-        this.city = new Float32Array(CANVAS_SIZE * CANVAS_SIZE).fill(-1);
+        this.city = new Float32Array(CANVAS_SIZE).fill(-1);
         // 0 = automatic, -1 = erased, otherwise an object bitmask
-        this.objects = new Float32Array(CANVAS_SIZE * CANVAS_SIZE).fill(0);
+        this.objects = new Float32Array(CANVAS_SIZE).fill(0);
         // 0 = automatic; otherwise an explicit terrain type (e.g. snow)
-        this.terrain = new Float32Array(CANVAS_SIZE * CANVAS_SIZE).fill(0);
+        this.terrain = new Float32Array(CANVAS_SIZE).fill(0);
     }
 
     setElevationParam(elevationParam) {
@@ -86,11 +92,11 @@ class Generator {
             return sum / sumOfAmplitudes;
         }
 
-        for (let y = 0; y < CANVAS_SIZE; y++) {
-            for (let x = 0; x < CANVAS_SIZE; x++) {
-                let p = y * CANVAS_SIZE + x;
-                let nx = 2 * x/CANVAS_SIZE - 1,
-                    ny = 2 * y/CANVAS_SIZE - 1;
+        for (let y = 0; y < CANVAS_HEIGHT; y++) {
+            for (let x = 0; x < CANVAS_WIDTH; x++) {
+                let p = y * CANVAS_WIDTH + x;
+                let nx = 2 * x/CANVAS_WIDTH - 1,
+                    ny = 2 * y/CANVAS_HEIGHT - 1;
                 let distance = Math.max(Math.abs(nx), Math.abs(ny));
                 let e = 0.5 * (fbm_noise(nx, ny) + island * (0.75 - 2 * distance * distance));
                 if (e < -1.0) { e = -1.0; }
@@ -134,15 +140,15 @@ class Generator {
 
         let newElevation = tool.elevation;
         let {innerRadius, outerRadius, rate} = size;
-        let xc = (x0 * CANVAS_SIZE) | 0, yc = (y0 * CANVAS_SIZE) | 0;
+        let xc = (x0 * CANVAS_WIDTH) | 0, yc = (y0 * CANVAS_HEIGHT) | 0;
         let top = Math.ceil(Math.max(0, yc - outerRadius)),
-            bottom = Math.floor(Math.min(CANVAS_SIZE-1, yc + outerRadius));
+            bottom = Math.floor(Math.min(CANVAS_HEIGHT-1, yc + outerRadius));
         for (let y = top; y <= bottom; y++) {
             let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
             let left = Math.max(0, xc - s),
-                right = Math.min(CANVAS_SIZE-1, xc + s);
+                right = Math.min(CANVAS_WIDTH-1, xc + s);
             for (let x = left; x <= right; x++) {
-                let p = y * CANVAS_SIZE + x;
+                let p = y * CANVAS_WIDTH + x;
                 let distance = Math.sqrt((x - xc) * (x - xc) + (y - yc) * (y - yc));
                 let strength = 1.0 - Math.min(1, Math.max(0, (distance - innerRadius) / (outerRadius - innerRadius)));
                 let factor = rate/1000 * deltaTimeInMs;
@@ -164,15 +170,15 @@ class Generator {
      */
     paintCountryAt(countryId: number, x0: number, y0: number, outerRadius: number) {
         let {country} = this;
-        let xc = (x0 * CANVAS_SIZE) | 0, yc = (y0 * CANVAS_SIZE) | 0;
+        let xc = (x0 * CANVAS_WIDTH) | 0, yc = (y0 * CANVAS_HEIGHT) | 0;
         let top = Math.ceil(Math.max(0, yc - outerRadius)),
-            bottom = Math.floor(Math.min(CANVAS_SIZE-1, yc + outerRadius));
+            bottom = Math.floor(Math.min(CANVAS_HEIGHT-1, yc + outerRadius));
         for (let y = top; y <= bottom; y++) {
             let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
             let left = Math.max(0, xc - s),
-                right = Math.min(CANVAS_SIZE-1, xc + s);
+                right = Math.min(CANVAS_WIDTH-1, xc + s);
             for (let x = left; x <= right; x++) {
-                country[y * CANVAS_SIZE + x] = countryId;
+                country[y * CANVAS_WIDTH + x] = countryId;
             }
         }
 
@@ -185,15 +191,15 @@ class Generator {
      */
     paintCityAt(zone: number, x0: number, y0: number, outerRadius: number) {
         let {city} = this;
-        let xc = (x0 * CANVAS_SIZE) | 0, yc = (y0 * CANVAS_SIZE) | 0;
+        let xc = (x0 * CANVAS_WIDTH) | 0, yc = (y0 * CANVAS_HEIGHT) | 0;
         let top = Math.ceil(Math.max(0, yc - outerRadius)),
-            bottom = Math.floor(Math.min(CANVAS_SIZE-1, yc + outerRadius));
+            bottom = Math.floor(Math.min(CANVAS_HEIGHT-1, yc + outerRadius));
         for (let y = top; y <= bottom; y++) {
             let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
             let left = Math.max(0, xc - s),
-                right = Math.min(CANVAS_SIZE-1, xc + s);
+                right = Math.min(CANVAS_WIDTH-1, xc + s);
             for (let x = left; x <= right; x++) {
-                city[y * CANVAS_SIZE + x] = zone;
+                city[y * CANVAS_WIDTH + x] = zone;
             }
         }
 
@@ -207,18 +213,18 @@ class Generator {
      */
     paintObjectAt(mask: number, x0: number, y0: number, outerRadius: number) {
         let {objects} = this;
-        let xc = (x0 * CANVAS_SIZE) | 0, yc = (y0 * CANVAS_SIZE) | 0;
+        let xc = (x0 * CANVAS_WIDTH) | 0, yc = (y0 * CANVAS_HEIGHT) | 0;
         let top = Math.ceil(Math.max(0, yc - outerRadius)),
-            bottom = Math.floor(Math.min(CANVAS_SIZE-1, yc + outerRadius));
+            bottom = Math.floor(Math.min(CANVAS_HEIGHT-1, yc + outerRadius));
         for (let y = top; y <= bottom; y++) {
             let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
             let left = Math.max(0, xc - s),
-                right = Math.min(CANVAS_SIZE-1, xc + s);
+                right = Math.min(CANVAS_WIDTH-1, xc + s);
             for (let x = left; x <= right; x++) {
-                let v = objects[y * CANVAS_SIZE + x];
+                let v = objects[y * CANVAS_WIDTH + x];
                 let forbidden = (v >> 4) & 0xF;
                 let forced = (v & 0xF) | mask;
-                objects[y * CANVAS_SIZE + x] = ((forbidden & ~mask) << 4) | forced;
+                objects[y * CANVAS_WIDTH + x] = ((forbidden & ~mask) << 4) | forced;
             }
         }
 
@@ -231,18 +237,18 @@ class Generator {
      */
     eraseObjectAt(mask: number, x0: number, y0: number, outerRadius: number) {
         let {objects} = this;
-        let xc = (x0 * CANVAS_SIZE) | 0, yc = (y0 * CANVAS_SIZE) | 0;
+        let xc = (x0 * CANVAS_WIDTH) | 0, yc = (y0 * CANVAS_HEIGHT) | 0;
         let top = Math.ceil(Math.max(0, yc - outerRadius)),
-            bottom = Math.floor(Math.min(CANVAS_SIZE-1, yc + outerRadius));
+            bottom = Math.floor(Math.min(CANVAS_HEIGHT-1, yc + outerRadius));
         for (let y = top; y <= bottom; y++) {
             let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
             let left = Math.max(0, xc - s),
-                right = Math.min(CANVAS_SIZE-1, xc + s);
+                right = Math.min(CANVAS_WIDTH-1, xc + s);
             for (let x = left; x <= right; x++) {
-                let v = objects[y * CANVAS_SIZE + x];
+                let v = objects[y * CANVAS_WIDTH + x];
                 let forbidden = ((v >> 4) & 0xF) | mask;
                 let forced = (v & 0xF) & ~mask;
-                objects[y * CANVAS_SIZE + x] = (forbidden << 4) | forced;
+                objects[y * CANVAS_WIDTH + x] = (forbidden << 4) | forced;
             }
         }
 
@@ -259,15 +265,15 @@ class Generator {
         // 12=forest, 16=desert) so bilinear sampling between two labels
         // never lands on a third label.
         const encoded = 4 * terrainType;
-        let xc = (x0 * CANVAS_SIZE) | 0, yc = (y0 * CANVAS_SIZE) | 0;
+        let xc = (x0 * CANVAS_WIDTH) | 0, yc = (y0 * CANVAS_HEIGHT) | 0;
         let top = Math.ceil(Math.max(0, yc - outerRadius)),
-            bottom = Math.floor(Math.min(CANVAS_SIZE-1, yc + outerRadius));
+            bottom = Math.floor(Math.min(CANVAS_HEIGHT-1, yc + outerRadius));
         for (let y = top; y <= bottom; y++) {
             let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
             let left = Math.max(0, xc - s),
-                right = Math.min(CANVAS_SIZE-1, xc + s);
+                right = Math.min(CANVAS_WIDTH-1, xc + s);
             for (let x = left; x <= right; x++) {
-                terrain[y * CANVAS_SIZE + x] = encoded;
+                terrain[y * CANVAS_WIDTH + x] = encoded;
             }
         }
 
@@ -288,7 +294,7 @@ const g = () => scenes[activeScene].gen;
 const sceneNames = () => scenes[activeScene].names;
 
 let exported = {
-    size: CANVAS_SIZE,
+    size: {w: CANVAS_WIDTH, h: CANVAS_HEIGHT},
     onUpdate: () => {},
     screenToWorldCoords: coords => coords,
     setElevationParam: elevationParam => g().setElevationParam(elevationParam),
@@ -688,7 +694,7 @@ function setUpPaintEventHandling() {
             const c = previewColor();
             exported.preview.push({
                 x: coords[0], y: coords[1],
-                radius: brushSize.outerRadius / CANVAS_SIZE,
+                radius: brushSize.outerRadius / CANVAS_WIDTH,
                 r: PR(c[0]), g: PR(c[1]), b: PR(c[2]),
             });
             if (exported.preview.length > 64) exported.preview.splice(0, exported.preview.length - 64);

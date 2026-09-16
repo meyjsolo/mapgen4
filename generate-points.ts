@@ -139,9 +139,9 @@ export function chooseTilePoints(seed: number, spacing: number, mountainSpacing:
  * LOD-independent, so each tile picks up the peaks in its rectangle and
  * the resulting mountains align across LODs and tiles.
  */
-export function generateMountainPeaks(seed: number, mountainSpacing: number, worldSize: number): Float32Array {
+export function generateMountainPeaks(seed: number, mountainSpacing: number, worldWidth: number, worldHeight: number): Float32Array {
     const generator = new Poisson({
-        shape: [worldSize, worldSize],
+        shape: [worldWidth, worldHeight],
         radius: mountainSpacing,
         tries: 30,
     }, makeRandFloat(seed));

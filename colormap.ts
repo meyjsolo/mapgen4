@@ -41,16 +41,9 @@ function colormap() {
                 r = 210 - 100*m;
                 g = 185 - 45*m;
                 b = 139 - 45*m;
-                /* High-land rock color: blend the base terrain into a light gray-brown
-                 * instead of pure white, so mountains read as a bit darker
-                 * rock (but still clearly brighter than snow) and stay
-                 * distinguished from the snow terrain brush. */
-                const rr = 222 - 12*m;
-                const gg = 212 - 12*m;
-                const bb = 192 - 10*m;
-                r = rr * e + r * (1-e);
-                g = gg * e + g * (1-e);
-                b = bb * e + b * (1-e);
+                r = 255 * e + r * (1-e),
+                g = 255 * e + g * (1-e),
+                b = 255 * e + b * (1-e);
             }
 
             pixels[p++] = r;

@@ -56,9 +56,9 @@ const initialParams = {
         ['flow', 0.2, 0, 1],
     ],
     render: [
-        ['zoom', 100/2000, 100/4000, 100/50],
+        ['zoom', 100/2000, 100/2000, 100/480],
         ['x', 2000, 0, 4000],
-        ['y', 2000, 0, 4000],
+        ['y', 1000, 0, 2000],
         ['light_angle_deg', 80, 0, 360],
         ['slope', 2, 0, 5],
         ['flat', 2.5, 0, 5],
@@ -66,7 +66,7 @@ const initialParams = {
         ['overhead', 30, 0, 60],
         ['tilt_deg', 0, 0, 90],
         ['rotate_deg', 0, -180, 180],
-        ['mountain_height', 50, 0, 250],
+        ['mountain_height', 80, 0, 250],
         ['outline_depth', 1, 0, 2],
         ['outline_strength', 15, 0, 30],
         ['outline_threshold', 0, 0, 100],
@@ -209,8 +209,8 @@ function main() {
     
     Painting.screenToWorldCoords = (coords) => {
         let out = render.screenToWorld(coords);
-        let size = getParam().world.size;
-        return [out[0] / size, out[1] / size];
+        let w = getParam().world.width, h = getParam().world.height;
+        return [out[0] / w, out[1] / h];
     };
 
     const numWorkers = Math.max(1, getParam().world.maxWorkers ?? 4);
@@ -265,7 +265,8 @@ function main() {
             genRect: tile.genRect,
             param: p,
             constraints: {
-                size: Painting.size,
+                sizeW: Painting.size.w,
+                sizeH: Painting.size.h,
                 constraints: Painting.constraints,
                 country: Painting.country,
                 city: Painting.city,

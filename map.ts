@@ -58,8 +58,8 @@ type PeakIndex = {
     grid: Map<number, number[]>; // cell key -> [x, y, x, y, ...]
 }
 
-function buildPeakIndex(mountainPeaks: Float32Array, cell: number, worldSize: number): PeakIndex {
-    const width = Math.ceil(worldSize / cell) + 2;
+function buildPeakIndex(mountainPeaks: Float32Array, cell: number, worldWidth: number): PeakIndex {
+    const width = Math.ceil(worldWidth / cell) + 2;
     const grid = new globalThis.Map<number, number[]>();
     for (let i = 0; i < mountainPeaks.length; i += 2) {
         const x = mountainPeaks[i], y = mountainPeaks[i+1];
@@ -71,7 +71,7 @@ function buildPeakIndex(mountainPeaks: Float32Array, cell: number, worldSize: nu
     return {cell, width, grid};
 }
 
-function calculateMountainDistance(mesh: Mesh, peakIndex: PeakIndex, jaggedness: number, noise0_t: Float32Array | null, distance_t: Float32Array) {
+function calculateMountainDistance(mesh: Mesh, peakIndex: PeakIndex, spacing: number, jaggedness: number, noise0_t: Float32Array | null, noise1_t: Float32Array | null, distance_t: Float32Array) {
     const {cell, width, grid} = peakIndex;
     const {numTriangles} = mesh;
     for (let t = 0; t < numTriangles; t++) {
@@ -90,6 +90,17 @@ function calculateMountainDistance(mesh: Mesh, peakIndex: PeakIndex, jaggedness:
             }
         }
         let d = Math.sqrt(best);
+        /* Match the original graph-BFS distance field: the summit triangle
+         * sits right at the peak (sharp, pointy tops) and the first ring
+         * drops steeply. */
+        d = Math.max(0.0, d - spacing * 0.2);
+        /* Every mountain differs in height/shape: modulate the distance
+         * with continuous, seamless noise (position-based) — this stands in
+         * for the irregular Poisson mesh that made each original peak
+         * unique. */
+        if (noise0_t) {
+            d *= 1 + 0.4 * noise0_t[t] + 0.25 * (noise1_t ? noise1_t[t] : 0);
+        }
         if (jaggedness > 0 && noise0_t) {
             d *= 1 + jaggedness * noise0_t[t];
         }
@@ -100,7 +111,7 @@ function calculateMountainDistance(mesh: Mesh, peakIndex: PeakIndex, jaggedness:
 /**
  * Save noise values in arrays.
  */
-function precalculateNoise(randFloat: () => number, mesh: Mesh, worldSize: number): PrecalculatedNoise {
+function precalculateNoise(randFloat: () => number, mesh: Mesh, worldWidth: number, worldHeight: number): PrecalculatedNoise {
     const noise2D = createNoise2D(randFloat);
     let {numTriangles} = mesh;
     let noise0_t = new Float32Array(numTriangles),
@@ -109,10 +120,10 @@ function precalculateNoise(randFloat: () => number, mesh: Mesh, worldSize: numbe
         noise4_t = new Float32Array(numTriangles),
         noise5_t = new Float32Array(numTriangles),
         noise6_t = new Float32Array(numTriangles);
-    let half = worldSize / 2;
+    let halfW = worldWidth / 2, halfH = worldHeight / 2;
     for (let t = 0; t < numTriangles; t++) {
-        let nx = (mesh.x_of_t(t)-half) / half,
-            ny = (mesh.y_of_t(t)-half) / half;
+        let nx = (mesh.x_of_t(t)-halfW) / halfW,
+            ny = (mesh.y_of_t(t)-halfH) / halfH;
         noise0_t[t] = noise2D(nx, ny);
         noise1_t[t] = noise2D(2*nx + 5, 2*ny + 5);
         noise2_t[t] = noise2D(4*nx + 7, 4*ny + 7);
@@ -127,7 +138,8 @@ function precalculateNoise(randFloat: () => number, mesh: Mesh, worldSize: numbe
 export default class Map {
     seed: number = -1;
     spacing: number;
-    worldSize: number;
+    worldWidth: number;
+    worldHeight: number;
     peakIndex: PeakIndex;
     precomputed: PrecalculatedNoise;
     mountainJaggedness: number = -Infinity;
@@ -157,8 +169,9 @@ export default class Map {
 
     constructor (public mesh: Mesh, public t_peaks: number[], param: any, mountainPeaks?: Float32Array) {
         this.spacing = param.spacing;
-        this.worldSize = param.world?.size ?? 1000;
-        this.peakIndex = buildPeakIndex(mountainPeaks ?? new Float32Array(0), param.mountainSpacing ?? 35, this.worldSize);
+        this.worldWidth = param.world?.width ?? param.world?.size ?? 1000;
+        this.worldHeight = param.world?.height ?? param.world?.size ?? 1000;
+        this.peakIndex = buildPeakIndex(mountainPeaks ?? new Float32Array(0), param.mountainSpacing ?? 35, this.worldWidth);
         this.elevation_t         = new Float32Array(mesh.numTriangles);
         this.elevation_r         = new Float32Array(mesh.numRegions);
         this.humidity_r          = new Float32Array(mesh.numRegions);
@@ -190,14 +203,14 @@ export default class Map {
      * Each solid triangle samples the country grid at its centroid;
      * each region takes the majority vote of the triangles around it.
      */
-    assignCountries(countryGrid: Float32Array, size: number) {
+    assignCountries(countryGrid: Float32Array, sizeW: number, sizeH: number) {
         let {mesh, country_t, country_r} = this;
         let {numSolidTriangles} = mesh;
         for (let t = 0; t < numSolidTriangles; t++) {
-            let x = mesh.x_of_t(t)/this.worldSize, y = mesh.y_of_t(t)/this.worldSize;
-            let xi = clamp((x * size) | 0, 0, size-1),
-                yi = clamp((y * size) | 0, 0, size-1);
-            country_t[t] = countryGrid[yi * size + xi];
+            let x = mesh.x_of_t(t)/this.worldWidth, y = mesh.y_of_t(t)/this.worldHeight;
+            let xi = clamp((x * sizeW) | 0, 0, sizeW-1),
+                yi = clamp((y * sizeH) | 0, 0, sizeH-1);
+            country_t[t] = countryGrid[yi * sizeW + xi];
         }
 
         let votes = new Int32Array(NUM_COUNTRIES);
@@ -226,14 +239,14 @@ export default class Map {
      * residential around it, park on the outskirts). Must be called
      * after assignElevation() so auto zones can see elevation_r.
      */
-    assignCity(cityGrid: Float32Array, size: number) {        let {mesh, city_t, city_r, elevation_r} = this;
+    assignCity(cityGrid: Float32Array, sizeW: number, sizeH: number) {        let {mesh, city_t, city_r, elevation_r} = this;
         let {numSolidTriangles} = mesh;
-        const half = this.worldSize / 2;
+        const halfW = this.worldWidth / 2, halfH = this.worldHeight / 2;
 
         function autoZone(r: number): number {
             const x = mesh.x_of_r(r), y = mesh.y_of_r(r);
             if (elevation_r[r] < 0.0) return CITY_WATER;
-            const d = Math.hypot(x - half, y - half) / half;
+            const d = Math.hypot((x - halfW) / halfW, (y - halfH) / halfH);
             const n = hash01(x, y);
             if (d < 0.12 + 0.06 * n) return CITY_COMMERCIAL;
             if (d < 0.38 + 0.16 * n) return CITY_RESIDENTIAL;
@@ -241,10 +254,10 @@ export default class Map {
         }
 
         for (let t = 0; t < numSolidTriangles; t++) {
-            let x = mesh.x_of_t(t) / this.worldSize, y = mesh.y_of_t(t) / this.worldSize;
-            let xi = clamp((x * size) | 0, 0, size - 1),
-                yi = clamp((y * size) | 0, 0, size - 1);
-            city_t[t] = cityGrid[yi * size + xi];
+            let x = mesh.x_of_t(t) / this.worldWidth, y = mesh.y_of_t(t) / this.worldHeight;
+            let xi = clamp((x * sizeW) | 0, 0, sizeW - 1),
+                yi = clamp((y * sizeH) | 0, 0, sizeH - 1);
+            city_t[t] = cityGrid[yi * sizeW + xi];
         }
 
         let votes = new Int32Array(NUM_CITY_ZONES);
@@ -289,21 +302,21 @@ export default class Map {
      * -1 for erase) by sampling the constraint canvas at each region
      * and triangle centroid. 0 means "automatic" — the zone decides.
      */
-    assignObjects(objectGrid: Float32Array, size: number) {
+    assignObjects(objectGrid: Float32Array, sizeW: number, sizeH: number) {
         let {mesh, object_t, object_r} = this;
         let {numSolidTriangles} = mesh;
         for (let t = 0; t < numSolidTriangles; t++) {
-            let x = mesh.x_of_t(t) / this.worldSize, y = mesh.y_of_t(t) / this.worldSize;
-            let xi = clamp((x * size) | 0, 0, size - 1),
-                yi = clamp((y * size) | 0, 0, size - 1);
-            object_t[t] = objectGrid[yi * size + xi];
+            let x = mesh.x_of_t(t) / this.worldWidth, y = mesh.y_of_t(t) / this.worldHeight;
+            let xi = clamp((x * sizeW) | 0, 0, sizeW - 1),
+                yi = clamp((y * sizeH) | 0, 0, sizeH - 1);
+            object_t[t] = objectGrid[yi * sizeW + xi];
         }
         for (let r = 0; r < mesh.numRegions; r++) {
             if (mesh.is_ghost_r(r)) { object_r[r] = OBJ_NONE; continue; }
-            let x = mesh.x_of_r(r) / this.worldSize, y = mesh.y_of_r(r) / this.worldSize;
-            let xi = clamp((x * size) | 0, 0, size - 1),
-                yi = clamp((y * size) | 0, 0, size - 1);
-            object_r[r] = objectGrid[yi * size + xi];
+            let x = mesh.x_of_r(r) / this.worldWidth, y = mesh.y_of_r(r) / this.worldHeight;
+            let xi = clamp((x * sizeW) | 0, 0, sizeW - 1),
+                yi = clamp((y * sizeH) | 0, 0, sizeH - 1);
+            object_r[r] = objectGrid[yi * sizeW + xi];
         }
     }
 
@@ -319,86 +332,86 @@ export default class Map {
      * The distance is computed on the 128x128 constraint canvas (cheap),
      * then weights are bilinear-sampled at each region/triangle centroid.
      */
-    assignTerrain(terrainGrid: Float32Array, size: number) {
+    assignTerrain(terrainGrid: Float32Array, sizeW: number, sizeH: number) {
         let {mesh, terrain_t, terrain_r, terrainWeight_t, terrainWeight_r} = this;
         let {numSolidTriangles} = mesh;
 
         const BLEND = 3; // transition-band radius in canvas cells
 
         // 1. label per canvas cell (0..4)
-        const label = new Int8Array(size * size);
-        for (let p = 0; p < size * size; p++) {
+        const label = new Int8Array(sizeW * sizeH);
+        for (let p = 0; p < sizeW * sizeH; p++) {
             label[p] = Math.round(terrainGrid[p] / 4);
         }
 
         // 2. distance to the nearest cell with a different label (or auto)
-        const dist = new Int16Array(size * size).fill(32767);
-        const queue = new Int32Array(size * size);
+        const dist = new Int16Array(sizeW * sizeH).fill(32767);
+        const queue = new Int32Array(sizeW * sizeH);
         let qin = 0, qout = 0;
         const isTopLabel = (p: number) => label[p] > 0;
-        for (let y = 0; y < size; y++) {
-            for (let x = 0; x < size; x++) {
-                const p = y * size + x;
+        for (let y = 0; y < sizeH; y++) {
+            for (let x = 0; x < sizeW; x++) {
+                const p = y * sizeW + x;
                 if (!isTopLabel(p)) continue;
                 // collect the 4-neighbour cell's labels
                 const own = label[p];
                 let different = false;
-                if (y > 0 && label[p - size] !== own) different = true;
-                if (y < size-1 && label[p + size] !== own) different = true;
+                if (y > 0 && label[p - sizeW] !== own) different = true;
+                if (y < sizeH-1 && label[p + sizeW] !== own) different = true;
                 if (x > 0 && label[p - 1] !== own) different = true;
-                if (x < size-1 && label[p + 1] !== own) different = true;
+                if (x < sizeW-1 && label[p + 1] !== own) different = true;
                 if (different) { dist[p] = 0; queue[qin++] = p; }
             }
         }
         while (qout < qin) {
             const p = queue[qout++];
-            const x = p % size, y = (p / size) | 0;
+            const x = p % sizeW, y = (p / sizeW) | 0;
             const own = label[p];
             const nd = dist[p] + 1;
-            if (y > 0) { const q = p - size; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
-            if (y < size-1) { const q = p + size; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (y > 0) { const q = p - sizeW; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (y < sizeH-1) { const q = p + sizeW; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
             if (x > 0) { const q = p - 1; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
-            if (x < size-1) { const q = p + 1; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (x < sizeW-1) { const q = p + 1; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
         }
 
         // 3. weight per canvas cell, bilinear-sampled at centroids
-        const weight = new Float32Array(size * size);
-        for (let p = 0; p < size * size; p++) {
+        const weight = new Float32Array(sizeW * sizeH);
+        for (let p = 0; p < sizeW * sizeH; p++) {
             weight[p] = label[p] === 0 ? 0 : Math.min(1, dist[p] / BLEND);
         }
 
         function sampleLabel(x: number, y: number): number {
-            x = clamp((x * size) | 0, 0, size - 1);
-            y = clamp((y * size) | 0, 0, size - 1);
-            return label[y * size + x];
+            x = clamp((x * sizeW) | 0, 0, sizeW - 1);
+            y = clamp((y * sizeH) | 0, 0, sizeH - 1);
+            return label[y * sizeW + x];
         }
         function sampleWeight(x: number, y: number): number {
-            x = clamp(x * (size-1), 0, size-2);
-            y = clamp(y * (size-1), 0, size-2);
+            x = clamp(x * (sizeW-1), 0, sizeW-2);
+            y = clamp(y * (sizeH-1), 0, sizeH-2);
             let xi = Math.floor(x), yi = Math.floor(y),
                 xf = x - xi, yf = y - yi;
-            let p = size * yi + xi;
+            let p = sizeW * yi + xi;
             let w00 = weight[p], w01 = weight[p + 1],
-                w10 = weight[p + size], w11 = weight[p + size + 1];
+                w10 = weight[p + sizeW], w11 = weight[p + sizeW + 1];
             return ((w00 * (1 - xf) + w01 * xf) * (1 - yf)
                  + (w10 * (1 - xf) + w11 * xf) * yf);
         }
 
         for (let t = 0; t < numSolidTriangles; t++) {
-            let x = mesh.x_of_t(t) / this.worldSize, y = mesh.y_of_t(t) / this.worldSize;
+            let x = mesh.x_of_t(t) / this.worldWidth, y = mesh.y_of_t(t) / this.worldHeight;
             terrain_t[t] = sampleLabel(x, y);
             terrainWeight_t[t] = sampleWeight(x, y);
         }
         for (let r = 0; r < mesh.numRegions; r++) {
             if (mesh.is_ghost_r(r)) { terrain_r[r] = TERRAIN_NONE; terrainWeight_r[r] = 0; continue; }
-            let x = mesh.x_of_r(r) / this.worldSize, y = mesh.y_of_r(r) / this.worldSize;
+            let x = mesh.x_of_r(r) / this.worldWidth, y = mesh.y_of_r(r) / this.worldHeight;
             terrain_r[r] = sampleLabel(x, y);
             terrainWeight_r[r] = sampleWeight(x, y);
         }
     }
 
     assignTriangleElevation(elevationParam: { noisy_coastlines: number; mountain_sharpness: number; hill_height: number; ocean_depth: number; },
-                            constraints: { constraints: Float32Array; size: any; }) {
+                            constraints: { constraints: Float32Array; sizeW: number; sizeH: number; }) {
         let {mesh, elevation_t, mountain_distance_t, precomputed} = this;
         let {numTriangles, numSolidTriangles} = mesh;
 
@@ -413,28 +426,24 @@ export default class Map {
         // in this thread.
         function constraintAt(x: number, y: number): number {
             // https://en.wikipedia.org/wiki/Bilinear_interpolation
-            const C = constraints.constraints, size = constraints.size;
-            // NOTE: there's a tricky "off by one" problem here. Since
-            // x can be from 0.000 to 0.999, and I want xInt+1 < size
-            // to leave one extra tile for bilinear filtering, that
-            // means I want xInt < size-1. So I need to multiply x and
-            // y by size-1, not by size.
-            x = clamp(x * (size-1), 0, size-2);
-            y = clamp(y * (size-1), 0, size-2);
+            const C = constraints.constraints;
+            const sizeW = constraints.sizeW, sizeH = constraints.sizeH;
+            x = clamp(x * (sizeW-1), 0, sizeW-2);
+            y = clamp(y * (sizeH-1), 0, sizeH-2);
             let xInt = Math.floor(x),
                 yInt = Math.floor(y),
                 xFrac = x - xInt,
                 yFrac = y - yInt;
-            let p = size * yInt + xInt;
+            let p = sizeW * yInt + xInt;
             let e00 = C[p],
             e01 = C[p + 1],
-            e10 = C[p + size],
-            e11 = C[p + size + 1];
+            e10 = C[p + sizeW],
+            e11 = C[p + sizeW + 1];
             return ((e00 * (1 - xFrac) + e01 * xFrac) * (1 - yFrac)
                 + (e10 * (1 - xFrac) + e11 * xFrac) * yFrac);
         }
         for (let t = 0; t < numSolidTriangles; t++) {
-            let e = constraintAt(mesh.x_of_t(t)/this.worldSize, mesh.y_of_t(t)/this.worldSize);
+            let e = constraintAt(mesh.x_of_t(t)/this.worldWidth, mesh.y_of_t(t)/this.worldHeight);
             // TODO: e*e*e*e seems too steep for this, as I want this
             // to apply mostly at the original coastlines and not
             // elsewhere
@@ -505,14 +514,15 @@ export default class Map {
         if (this.seed !== elevationParam.seed) {
             // TODO: function should reuse existing arrays
             this.seed = elevationParam.seed;
-            this.precomputed = precalculateNoise(makeRandFloat(elevationParam.seed), this.mesh, this.worldSize);
+            this.precomputed = precalculateNoise(makeRandFloat(elevationParam.seed), this.mesh, this.worldWidth, this.worldHeight);
         }
 
         if (this.mountainJaggedness !== elevationParam.mountain_jagged) {
             this.mountainJaggedness = elevationParam.mountain_jagged;
             calculateMountainDistance(
-                this.mesh, this.peakIndex, this.mountainJaggedness,
+                this.mesh, this.peakIndex, this.spacing, this.mountainJaggedness,
                 this.precomputed?.noise0_t ?? null,
+                this.precomputed?.noise1_t ?? null,
                 this.mountain_distance_t
             );
         }
