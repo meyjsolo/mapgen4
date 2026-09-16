@@ -798,6 +798,15 @@ export default class Renderer {
         return [transformed[0], transformed[1]];
     }
 
+    /* Convert a world position to normalized [0,1] screen coordinates
+     * within the map viewport (y down), using the current projection.
+     * Used by the city marker overlay. */
+    worldToScreen(x: number, y: number): [number, number] {
+        const v = vec4.create();
+        vec4.transformMat4(v, vec4.fromValues(x, y, 0, 1), this.projection);
+        return [(v[0] + 1) / 2, (1 - v[1]) / 2];
+    }
+
     /* ---- per-tile geometry handling ---- */
 
     onTileReady(tile: Tile, data: {
@@ -1402,6 +1411,9 @@ export default class Renderer {
 
             this.updateLabelPositions();
 
+            /* city markers overlay follows the projection (set by mapgen4) */
+            if (this.cityUI) this.cityUI.updatePositions();
+
             if (this.screenshotCallback) {
                 const ctx = this.screenshotCanvas.getContext('2d');
                 const imageData = ctx.getImageData(0, 0, this.screenshotCanvas.width, this.screenshotCanvas.height);
@@ -1432,6 +1444,7 @@ export default class Renderer {
     }
 
     bench: any = null;
+    cityUI: any = null;
     continuous: boolean = false;
     lastRender: any = null;
 

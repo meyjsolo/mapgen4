@@ -18,6 +18,8 @@ import {WorldManager} from "./world.ts";
 import Painting from "./painting.ts";
 import Renderer from "./render.ts";
 import Bench from "./benchmark.ts";
+import {CityManager} from "./cities.ts";
+import CityUI from "./city-ui.ts";
 import type {Tile} from "./world.ts";
 
 /* The wild and city scenes are two completely independent maps: each
@@ -88,6 +90,9 @@ function main() {
     const world = new WorldManager(getParam());
     const render = new Renderer(world);
     render.bench = new Bench(baseParam.benchmark.enabled);
+    const cityManager = new CityManager();
+    const cityUI = new CityUI(render, cityManager);
+    render.cityUI = cityUI;
 
     /* set initial parameters */
     for (let phase of ['elevation', 'biomes', 'rivers', 'render']) {
@@ -343,6 +348,7 @@ function main() {
             activeScene,
             params: params,
             scenes: Painting.dumpScenes(),
+            cities: cityManager.toJSON(),
         };
         const blob = new Blob([JSON.stringify(data)], {type: 'application/json'});
         const url = URL.createObjectURL(blob);
@@ -364,6 +370,9 @@ function main() {
             getParam().render.city_mode = 0;
             Painting.setScene(activeScene);
             syncSlidersToScene();
+            cityManager.fromJSON(data.cities);
+            cityUI.selectedCityId = null;
+            cityUI.rebuild();
             generate();
         }).catch(err => {
             console.error("import failed", err);

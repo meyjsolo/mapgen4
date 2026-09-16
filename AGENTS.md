@@ -33,6 +33,8 @@ There is **no lint, no typecheck, and no test command**. esbuild does not type-c
 - `worker.ts` — map generation in the worker; per-tile `genTile` messages; caches tile meshes and per-scene `Map` instances; scales `lg_min_flow` per LOD (river continuity).
 - `map.ts` — terrain algorithms (elevation, rainfall, rivers); now world-size-parameterized.
 - `painting.ts` — user brush painting → constraints.
+- `cities.ts` — city data model (`City` + `CityManager`: create/update/delete/get), independent of terrain, positions in world coordinates.
+- `city-ui.ts` — city marker/label DOM overlay (positioned each frame from world coords via `render.worldToScreen`), pointer-based interaction: tap = select/deselect, long-press/right-click = context menu (创建/编辑/删除城市), dialogs, selection state.
 - `render.ts` — WebGL2 renderer; screen-space adaptive pipeline (renders only visible tiles per frame into 2048² framebuffers), per-tile GPU buffers, viewport culling, LOD fallback.
 - `generate-points.ts` / `serialize-points.ts` — point precomputation (legacy) + per-tile/peak helpers (`chooseTilePoints`, `generateMountainPeaks`).
 - `geometry.ts` — shared worker+render geometry math; fills the QuadGeometry buffers.
