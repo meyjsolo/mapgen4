@@ -12,18 +12,20 @@ export interface City {
     name: string;
     x: number; /* world X */
     y: number; /* world Y */
+    placed: boolean; /* false = created in the panel but not yet dropped on the map */
 }
 
 export class CityManager {
     cities: City[] = [];
     private nextId = 1;
 
-    createCity(name: string, x: number, y: number): City {
+    createCity(name: string, x?: number, y?: number): City {
         const city: City = {
             id: 'city-' + (this.nextId++),
             name,
-            x,
-            y,
+            x: x ?? 0,
+            y: y ?? 0,
+            placed: x !== undefined && y !== undefined,
         };
         this.cities.push(city);
         return city;
@@ -32,7 +34,16 @@ export class CityManager {
     updateCity(id: string, name: string): City | null {
         const city = this.getCity(id);
         if (!city) return null;
-        city.name = name; /* position never changes via edit */
+        city.name = name;
+        return city;
+    }
+
+    setCityPosition(id: string, x: number, y: number): City | null {
+        const city = this.getCity(id);
+        if (!city) return null;
+        city.x = x;
+        city.y = y;
+        city.placed = true;
         return city;
     }
 
@@ -61,6 +72,7 @@ export class CityManager {
             name: String(c.name ?? ''),
             x: Number(c.x) || 0,
             y: Number(c.y) || 0,
+            placed: c.placed !== false, /* old saves have no placed field */
         }));
         /* keep ids unique when new cities are created after a load */
         let max = 0;

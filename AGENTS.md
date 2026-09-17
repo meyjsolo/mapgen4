@@ -42,7 +42,7 @@ The app runs **two fully independent maps** ("scenes") with a toggle in the UI (
 - `city.ts` — city layout constants: zone ids (`CITY_WATER/PARK/RESIDENTIAL/COMMERCIAL`, -1 = unpainted → automatic seeded layout in `Map.assignCity()`) and bit-packed object-layer encoding.
 - `colormap.ts` — biome colormap texture (indexed by elevation × rainfall) used by the renderer.
 - `cities.ts` — city data model (`City` + `CityManager`: create/update/delete/get), independent of terrain, positions in world coordinates.
-- `city-ui.ts` — city marker/label DOM overlay (positioned each frame from world coords via `render.worldToScreen`), pointer-based interaction: tap = select/deselect, long-press/right-click = context menu (创建/编辑/删除城市), dialogs, selection state.
+- `city-ui.ts` — city edit panel (`#city-panel`, right side): create/rename/delete via panel + dialogs; drag a panel item onto the map to place/re-place the city; city marker/label DOM overlay (positioned each frame from world coords via `render.worldToScreen`), tap = select/deselect, drag a marker = move the city. Unplaced cities (`City.placed === false`) show only in the panel.
 - `render.ts` — WebGL2 renderer; screen-space adaptive pipeline (renders only visible tiles per frame into 2048² framebuffers), per-tile GPU buffers, viewport culling, LOD fallback.
 - `generate-points.ts` / `serialize-points.ts` — point precomputation (legacy) + per-tile/peak helpers (`chooseTilePoints`, `generateMountainPeaks`).
 - `geometry.ts` — shared worker+render geometry math; fills the QuadGeometry buffers.

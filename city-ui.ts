@@ -3,22 +3,24 @@
  * Copyright 2025 Red Blob Games <redblobgames@gmail.com>
  * License: Apache v2.0 <http://www.apache.org/licenses/LICENSE-2.0.html>
  *
- * City marker UI + interaction. Renders each city as a DOM marker/label
- * overlay inside the map, positioned every frame from world coordinates via
- * the shared projection (so markers follow pan/zoom automatically).
- *
- * Interaction is pointer-based so it works for mouse AND touch:
- *   - tap (quick press-release)        -> select / deselect city
- *   - long-press (hold ~500ms) or      -> context menu:
- *       right-click                      * empty  : "创建城市"
- *                                        * city   : "编辑城市 / 删除城市"
+ * City marker UI + interaction. Cities are managed from an edit panel on
+ * the right side of the page (#city-panel):
+ *   - "创建城市" button -> name dialog -> city appears in the panel list
+ *     (not on the map yet; it is "unplaced").
+ *   - drag a panel item onto the map -> the city is placed at the drop
+ *     point; dragging a placed city's panel item re-places it.
+ *   - click a panel item -> menu: 修改名称 / 删除城市.
+ * On the map each placed city is a DOM marker/label overlay positioned
+ * every frame from world coordinates via the shared projection (so markers
+ * follow pan/zoom automatically):
+ *   - tap a marker  -> select / deselect
+ *   - drag a marker -> move the city to a new position
  * Cities are stored in world coordinates (CityManager), never screen-space.
  */
 
 import {CityManager} from './cities.ts';
 import type Renderer from './render.ts';
 
-const LONG_PRESS_MS = 500;
 const MOVE_THRESHOLD = 10; /* px before a press is treated as a drag */
 const MENU_W = 140;
 const MENU_H = 90;
@@ -37,21 +39,23 @@ interface DialogOptions {
 export default class CityUI {
     private layer: HTMLDivElement;
     private mapEl: HTMLElement;
+    private panelEl: HTMLElement;
+    private listEl: HTMLDivElement;
     private els = new Map<string, ElemSet>();
     private menuEl: HTMLDivElement | null = null;
     private dialogEl: HTMLDivElement | null = null;
+    private ghostEl: HTMLDivElement | null = null;
 
     selectedCityId: string | null = null;
 
+    /* map press state: tap-select or marker drag */
     private press = {
         active: false,
         pointerId: -1,
         startX: 0,
         startY: 0,
-        timer: null as number | null,
         cityId: null as string | null,
-        longFired: false,
-        suppressNextContext: false,
+        dragging: false,
     };
 
     constructor(private render: Renderer, private cities: CityManager) {
@@ -60,37 +64,148 @@ export default class CityUI {
         this.layer.id = 'city-markers';
         this.mapEl.appendChild(this.layer);
 
+        this.panelEl = document.getElementById('city-panel') as HTMLElement;
+        const title = document.createElement('div');
+        title.className = 'city-panel-title';
+        title.textContent = '城市';
+        const createBtn = document.createElement('button');
+        createBtn.type = 'button';
+        createBtn.className = 'city-create-btn';
+        createBtn.textContent = '＋ 创建城市';
+        createBtn.addEventListener('click', () => this.openCreateDialog());
+        this.listEl = document.createElement('div');
+        this.listEl.className = 'city-list';
+        this.panelEl.appendChild(title);
+        this.panelEl.appendChild(createBtn);
+        this.panelEl.appendChild(this.listEl);
+
         this.mapEl.addEventListener('pointerdown', this.onPress.bind(this));
         this.mapEl.addEventListener('pointermove', this.onMove.bind(this));
         this.mapEl.addEventListener('pointerup', this.onRelease.bind(this));
         this.mapEl.addEventListener('pointercancel', this.onRelease.bind(this));
-        this.mapEl.addEventListener('contextmenu', this.onContextMenu.bind(this));
         window.addEventListener('keydown', this.onKey.bind(this));
         document.addEventListener('pointerdown', this.onDocPointerDown.bind(this));
+
+        this.rebuild();
     }
 
-    /* Recreate all marker/label elements from the CityManager. Call after
-     * create/edit/delete/load. */
+    /* Recreate all marker/label elements and the panel list from the
+     * CityManager. Call after create/edit/delete/place/load. */
     rebuild() {
         for (const e of this.els.values()) { e.marker.remove(); e.label.remove(); }
         this.els.clear();
+        this.listEl.textContent = '';
         for (const c of this.cities.getCities()) {
-            const marker = document.createElement('button');
-            marker.type = 'button';
-            marker.className = 'city-marker';
-            marker.dataset.cityId = c.id;
-            marker.setAttribute('aria-label', c.name);
-            const label = document.createElement('button');
-            label.type = 'button';
-            label.className = 'city-label';
-            label.dataset.cityId = c.id;
-            label.textContent = c.name;
-            this.layer.appendChild(marker);
-            this.layer.appendChild(label);
-            this.els.set(c.id, {marker, label});
+            if (c.placed) {
+                const marker = document.createElement('button');
+                marker.type = 'button';
+                marker.className = 'city-marker';
+                marker.dataset.cityId = c.id;
+                marker.setAttribute('aria-label', c.name);
+                const label = document.createElement('button');
+                label.type = 'button';
+                label.className = 'city-label';
+                label.dataset.cityId = c.id;
+                label.textContent = c.name;
+                this.layer.appendChild(marker);
+                this.layer.appendChild(label);
+                this.els.set(c.id, {marker, label});
+            }
+            this.listEl.appendChild(this.buildPanelItem(c.id, c.name, c.placed));
         }
         this.applySelection();
         this.updatePositions();
+    }
+
+    /* ---- panel ---- */
+
+    private buildPanelItem(cityId: string, name: string, placed: boolean): HTMLDivElement {
+        const item = document.createElement('div');
+        item.className = 'city-item' + (placed ? '' : ' unplaced');
+        item.dataset.cityId = cityId;
+        const dot = document.createElement('span');
+        dot.className = 'city-item-dot';
+        const text = document.createElement('span');
+        text.className = 'city-item-name';
+        text.textContent = name;
+        item.appendChild(dot);
+        item.appendChild(text);
+        if (!placed) {
+            const hint = document.createElement('span');
+            hint.className = 'city-item-hint';
+            hint.textContent = '拖到地图放置';
+            item.appendChild(hint);
+        }
+
+        let startX = 0, startY = 0, dragging = false, pointerId = -1;
+        item.addEventListener('pointerdown', (e: PointerEvent) => {
+            if (e.button !== 0) return;
+            this.closeMenu();
+            pointerId = e.pointerId;
+            startX = e.clientX;
+            startY = e.clientY;
+            dragging = false;
+            item.setPointerCapture(pointerId);
+            e.preventDefault();
+        });
+        item.addEventListener('pointermove', (e: PointerEvent) => {
+            if (e.pointerId !== pointerId) return;
+            if (!dragging && Math.hypot(e.clientX - startX, e.clientY - startY) > MOVE_THRESHOLD) {
+                dragging = true;
+                this.showGhost(name, e.clientX, e.clientY);
+            }
+            if (dragging) this.moveGhost(e.clientX, e.clientY);
+        });
+        const finish = (e: PointerEvent) => {
+            if (e.pointerId !== pointerId) return;
+            pointerId = -1;
+            if (dragging) {
+                dragging = false;
+                this.hideGhost();
+                const r = this.canvasRect();
+                if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+                    const w = this.pointerWorld(e.clientX, e.clientY);
+                    this.cities.setCityPosition(cityId, w.x, w.y);
+                    this.selectedCityId = cityId;
+                    this.rebuild();
+                }
+            } else {
+                this.openItemMenu(e.clientX, e.clientY, cityId);
+            }
+        };
+        item.addEventListener('pointerup', finish);
+        item.addEventListener('pointercancel', (e: PointerEvent) => {
+            if (e.pointerId !== pointerId) return;
+            pointerId = -1;
+            dragging = false;
+            this.hideGhost();
+        });
+        return item;
+    }
+
+    private showGhost(name: string, x: number, y: number) {
+        this.hideGhost();
+        const ghost = document.createElement('div');
+        ghost.className = 'city-drag-ghost';
+        const dot = document.createElement('span');
+        dot.className = 'city-item-dot';
+        const text = document.createElement('span');
+        text.textContent = name;
+        ghost.appendChild(dot);
+        ghost.appendChild(text);
+        document.body.appendChild(ghost);
+        this.ghostEl = ghost;
+        this.moveGhost(x, y);
+    }
+
+    private moveGhost(x: number, y: number) {
+        if (!this.ghostEl) return;
+        this.ghostEl.style.left = x + 'px';
+        this.ghostEl.style.top = y + 'px';
+    }
+
+    private hideGhost() {
+        if (this.ghostEl) { this.ghostEl.remove(); this.ghostEl = null; }
     }
 
     /* Reposition every city marker/label from world coords via the
@@ -161,65 +276,47 @@ export default class CityUI {
         return null;
     }
 
-    /* ---- pointer gestures (tap / long-press) ---- */
+    /* ---- map pointer gestures (tap-select / marker drag) ---- */
 
     private onPress(e: PointerEvent) {
-        if (e.button !== 0) return; /* right/middle handled by contextmenu */
+        if (e.button !== 0) return;
         this.closeMenu();
         this.press.active = true;
         this.press.pointerId = e.pointerId;
         this.press.startX = e.clientX;
         this.press.startY = e.clientY;
-        this.press.longFired = false;
-        this.press.suppressNextContext = false;
+        this.press.dragging = false;
         this.press.cityId = this.cityIdAt(e.clientX, e.clientY);
-        if (this.press.timer !== null) clearTimeout(this.press.timer);
-        this.press.timer = window.setTimeout(() => this.fireLongPress(), LONG_PRESS_MS);
+        if (this.press.cityId) {
+            /* keep receiving moves even off the marker; the canvas never
+             * sees this press, so painting does not start */
+            this.mapEl.setPointerCapture(e.pointerId);
+        }
     }
 
     private onMove(e: PointerEvent) {
         if (!this.press.active || e.pointerId !== this.press.pointerId) return;
         const dx = e.clientX - this.press.startX, dy = e.clientY - this.press.startY;
-        if (Math.hypot(dx, dy) > MOVE_THRESHOLD && !this.press.longFired) {
-            if (this.press.timer !== null) { clearTimeout(this.press.timer); this.press.timer = null; }
+        if (!this.press.dragging && Math.hypot(dx, dy) > MOVE_THRESHOLD) {
+            this.press.dragging = true;
+        }
+        if (this.press.dragging && this.press.cityId) {
+            const w = this.pointerWorld(e.clientX, e.clientY);
+            this.cities.setCityPosition(this.press.cityId, w.x, w.y);
+            this.updatePositions();
         }
     }
 
     private onRelease(e: PointerEvent) {
         if (!this.press.active || e.pointerId !== this.press.pointerId) return;
         const p = this.press;
-        this.press = { ...this.press, active: false, pointerId: -1, timer: null, longFired: false, suppressNextContext: false };
-        if (p.timer !== null) clearTimeout(p.timer);
-        if (p.longFired) return; /* a menu is already open; don't tap-select */
+        this.press = { active: false, pointerId: -1, startX: 0, startY: 0, cityId: null, dragging: false };
+        if (p.dragging) return; /* marker move already committed during drag */
         const moved = Math.hypot(e.clientX - p.startX, e.clientY - p.startY);
         if (moved > MOVE_THRESHOLD) return; /* was a drag/pan */
         /* it's a tap */
         if (p.cityId) this.selectCity(p.cityId);
         else this.deselectAll();
-    }
-
-    private fireLongPress() {
-        this.press.longFired = true;
-        this.press.suppressNextContext = true;
-        const world = this.pointerWorld(this.press.startX, this.press.startY);
-        if (this.press.cityId) {
-            this.openMenu(this.press.startX, this.press.startY, this.press.cityId);
-        } else {
-            this.openCreateMenu(this.press.startX, this.press.startY, world.x, world.y);
-        }
-    }
-
-    private onContextMenu(e: MouseEvent) {
-        e.preventDefault();
-        if (this.press.suppressNextContext) { this.press.suppressNextContext = false; return; }
-        this.closeMenu();
-        const world = this.pointerWorld(e.clientX, e.clientY);
-        const id = this.cityIdAt(e.clientX, e.clientY);
-        if (id) {
-            this.openMenu(e.clientX, e.clientY, id);
-        } else {
-            this.openCreateMenu(e.clientX, e.clientY, world.x, world.y);
-        }
     }
 
     private onDocPointerDown(e: PointerEvent) {
@@ -235,7 +332,7 @@ export default class CityUI {
         }
     }
 
-    /* ---- context menu ---- */
+    /* ---- panel item menu ---- */
 
     private menuButton(text: string, fn: () => void): HTMLButtonElement {
         const b = document.createElement('button');
@@ -245,22 +342,11 @@ export default class CityUI {
         return b;
     }
 
-    private openCreateMenu(x: number, y: number, wx: number, wy: number) {
+    private openItemMenu(x: number, y: number, cityId: string) {
         this.closeMenu();
         const menu = document.createElement('div');
         menu.className = 'city-menu';
-        menu.appendChild(this.menuButton('创建城市', () => {
-            this.closeMenu();
-            this.openCreateDialog(wx, wy);
-        }));
-        this.showMenu(menu, x, y);
-    }
-
-    private openMenu(x: number, y: number, cityId: string) {
-        this.closeMenu();
-        const menu = document.createElement('div');
-        menu.className = 'city-menu';
-        menu.appendChild(this.menuButton('编辑城市', () => {
+        menu.appendChild(this.menuButton('修改名称', () => {
             this.closeMenu();
             this.openEditDialog(cityId);
         }));
@@ -268,10 +354,6 @@ export default class CityUI {
             this.closeMenu();
             this.openDeleteDialog(cityId);
         }));
-        this.showMenu(menu, x, y);
-    }
-
-    private showMenu(menu: HTMLDivElement, x: number, y: number) {
         menu.style.left = Math.min(x, Math.max(0, window.innerWidth - MENU_W)) + 'px';
         menu.style.top = Math.min(y, Math.max(0, window.innerHeight - MENU_H)) + 'px';
         document.body.appendChild(menu);
@@ -284,13 +366,13 @@ export default class CityUI {
 
     /* ---- dialogs ---- */
 
-    private openCreateDialog(x: number, y: number) {
+    private openCreateDialog() {
         this.openDialog({
             title: '创建城市',
             input: {label: '城市名称', value: ''},
             ok: '创建',
             onOk: (name) => {
-                const city = this.cities.createCity(name, x, y);
+                const city = this.cities.createCity(name);
                 this.selectedCityId = city.id;
                 this.rebuild();
                 return true;

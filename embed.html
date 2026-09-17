@@ -44,6 +44,20 @@
     .country-name-label { position: absolute; left: 0; top: 0; transform: translate(-50%, -50%); background: rgba(0,0,0,0.55); color: #fff; padding: 1px 6px; border-radius: 3px; font: 13px sans-serif; white-space: nowrap; }
     #sliders    { grid-area: 7 / 3 / span 1 / span 4; overflow-y: scroll; overflow-x: clip; line-height: 1.1; }
 
+    /* ---- city edit panel (right side) ---- */
+    #city-panel { grid-area: 1 / 7 / span 7 / span 1; justify-self: start; align-self: start; width: 160px; max-height: 100%; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; font-family: var(--sans-serif, sans-serif); }
+    .city-panel-title { font-size: 13px; font-weight: bold; color: #444; }
+    .city-create-btn { width: 100%; padding: 6px 0; border: 1px solid #bbb; font-size: 13px; font-family: var(--sans-serif, sans-serif); }
+    .city-create-btn:hover { background: #e8f0fe; }
+    .city-list { display: flex; flex-direction: column; gap: 4px; }
+    .city-item { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: grab; touch-action: none; user-select: none; font-size: 13px; }
+    .city-item:hover { background: #e8f0fe; }
+    .city-item.unplaced { border-style: dashed; color: #777; }
+    .city-item-dot { flex: 0 0 auto; width: 12px; height: 12px; border-radius: 50%; background: #ff4d4d; border: 2px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.7); box-sizing: border-box; }
+    .city-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .city-item-hint { flex: 0 0 auto; font-size: 10px; color: #999; }
+    .city-drag-ghost { position: fixed; z-index: 40; transform: translate(-50%, -50%); pointer-events: none; display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: rgba(255,255,255,.9); border: 1px solid #1a73e8; border-radius: 6px; font-size: 13px; font-family: var(--sans-serif, sans-serif); opacity: .85; }
+
     @media (orientation: portrait) {
         /* Put the buttons on bottom instead of on the right */
         #ui {
@@ -65,6 +79,7 @@
         #desert { grid-area: 7 / 2 / span 1 / span 1; }
         #countries { grid-area: 8 / 1 / span 1 / span 2; }
         #sliders { grid-area: 2 / 3 / span 7 / span 1; justify-self: end; width: 100%; column-width: 20ch; }
+        #city-panel { grid-area: 9 / 1 / span 1 / span 3; width: 100%; max-height: 30vh; }
     }
 
     #mapgen4 { width: 100%; height: 100%; cursor: crosshair; }
@@ -143,6 +158,7 @@
   <button id="desert" title="Desert"><svg viewBox="-50 -50 100 100"><text y="45">Desert</text><path d="M -50,5 q 20,-20 40,0 q 20,20 40,0 q 10,-10 20,0 l 0,15 l -100,0 z" fill="hsl(45,50%,60%)"/></svg></button>
   <div id="countries"><span class="country-label">Countries</span></div>
   <div id="city-tools"></div>
+  <div id="city-panel"></div>
 
   <div id="sliders">
     <button id="button-reset">Reset</button>
