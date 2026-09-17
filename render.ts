@@ -248,14 +248,15 @@ class WebGLWrapper {
 const vert_river = `
     precision highp float;
     uniform mat4 u_projection;
-    in vec4 a_xyww; // x, y, width1, width2 (widths are constant across vertices)
+    in vec3 a_xyz;  // x, y, terrain elevation (same displaced space as land)
+    in vec2 a_ww;   // width1, width2 (widths are constant across vertices)
     out vec2 v_riverwidth;
     out vec3 v_barycentric;
     void main() {
-        v_riverwidth = a_xyww.ba;
+        v_riverwidth = a_ww;
         int index = gl_VertexID % 3;
         v_barycentric = vec3(index == 0, index == 1, index == 2);
-        gl_Position = u_projection * vec4(a_xyww.xy, 0, 1);
+        gl_Position = u_projection * vec4(a_xyz, 1);
     }`;
 
 const frag_river = `
@@ -941,7 +942,7 @@ export default class Renderer {
         if (!geo.gpu) geo.gpu = this.createTileBuffers(geo);
         geo.gpu.buffer_quad_em.subdata(0, geo.a_quad_em);
         geo.gpu.buffer_quad_elements.subdata(0, geo.quad_elements.subarray(0, geo.quad_elements_length));
-        geo.gpu.buffer_river_xyww.subdata(0, geo.a_river_xyww.subarray(0, 4 * 3 * geo.numRiverTriangles));
+        geo.gpu.buffer_river_xyww.subdata(0, geo.a_river_xyww.subarray(0, 5 * 3 * geo.numRiverTriangles));
         const border = this.ensureOverlayBuffer(geo, 'buffer_border_xy', geo.a_border_xy);
         if (border) border.subdata(0, geo.a_border_xy.subarray(0, 18 * geo.numBorderSegments));
         const road = this.ensureOverlayBuffer(geo, 'buffer_road_xy', geo.a_road_xy);
@@ -974,16 +975,13 @@ export default class Renderer {
     }
 
     /* Clip rendering to the tile's visible world rect so halo geometry
-     * does not bleed into neighboring tiles. The scissor bbox is computed
-     * from the tile's world rect corners projected at both z=0 (base) and
-     * z=maxElevation (peak), and the two bboxes are merged. Terrain
-     * vertices are Z-displaced by elevation in the vertex shaders
-     * (vert_land/vert_depth/vert_drape), and the projection has an oblique
-     * skew (projection[9]=1) that maps world-z onto screen-Y. Projecting
-     * only at z=0 would clip mountain peaks that rise above their tile's
-     * flat footprint — the neighbor tile would then overwrite the peak
-     * with its own low-elevation terrain. */
-    private scissorTile(tile: Tile) {
+     * does not bleed into neighboring tiles. Passes that displace
+     * vertices by elevation (mountains) must pass zMax: the box is then
+     * expanded in the on-screen direction +z maps to, so terrain whose
+     * silhouette crosses a tile seam is not clipped away. Adjacent
+     * tiles redraw identical apron geometry in the overlap band, so
+     * the expansion does not create conflicts. */
+    private scissorTile(tile: Tile, zMax: number = 0) {
         const {gl} = this.webgl;
         const [x0, y0, w, h] = tile.rect;
         const corners = [[x0, y0], [x0+w, y0], [x0, y0+h], [x0+w, y0+h]];
@@ -1003,6 +1001,14 @@ export default class Renderer {
             if (v[0] > maxX) maxX = v[0];
             if (v[1] < minY) minY = v[1];
             if (v[1] > maxY) maxY = v[1];
+        }
+        if (zMax > 0) {
+            /* on-screen displacement of a unit of +z (column 2 of the
+             * projection, gl-matrix column-major layout) */
+            const dzx = this.projection[8] * zMax;
+            const dzy = this.projection[9] * zMax;
+            if (dzx > 0) maxX += dzx; else minX += dzx;
+            if (dzy > 0) maxY += dzy; else minY += dzy;
         }
         const W = fbo_texture_width, H = fbo_texture_height;
         const px = Math.floor((minX + 1) / 2 * W);
@@ -1041,7 +1047,8 @@ export default class Renderer {
             gl.enable(gl.BLEND);
             gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
             gl.blendEquation(gl.FUNC_ADD);
-            geo.gpu.buffer_river_xyww.vertexAttribPointer(program.a_xyww, 4, gl.FLOAT, false, 0, 0);
+            geo.gpu.buffer_river_xyww.vertexAttribPointer(program.a_xyz, 3, gl.FLOAT, false, 20, 0);
+            geo.gpu.buffer_river_xyww.vertexAttribPointer(program.a_ww, 2, gl.FLOAT, false, 20, 12);
             gl.drawArrays(gl.TRIANGLES, 0, 3 * geo.numRiverTriangles);
         });
     }
@@ -1374,7 +1381,7 @@ export default class Renderer {
             for (const tile of tiles) {
                 const geo = this.tileGeo.get(tile.key);
                 if (!geo) continue;
-                this.scissorTile(tile);
+                this.scissorTile(tile, TERRAIN_Z_MAX);
                 this.drawTileLand(geo, renderParam.outline_water);
                 this.endScissor();
             }
@@ -1382,7 +1389,7 @@ export default class Renderer {
                 for (const tile of tiles) {
                     const geo = this.tileGeo.get(tile.key);
                     if (!geo) continue;
-                    this.scissorTile(tile);
+                    this.scissorTile(tile, TERRAIN_Z_MAX);
                     this.drawTileDepth(geo);
                     this.endScissor();
                 }
@@ -1404,7 +1411,7 @@ export default class Renderer {
             for (const tile of tiles) {
                 const geo = this.tileGeo.get(tile.key);
                 if (!geo) continue;
-                this.scissorTile(tile);
+                this.scissorTile(tile, TERRAIN_Z_MAX);
                 this.drawTileDrape(geo, renderParam);
                 this.endScissor();
             }

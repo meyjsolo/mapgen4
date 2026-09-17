@@ -32,6 +32,14 @@ const params = {
 };
 function getParam() { return params[activeScene]; }
 
+/* Bumped whenever terrain-affecting inputs (painting, elevation/biomes/
+ * rivers params, seed) change OUTSIDE of an active brush stroke. The
+ * workers rebuild their world-level reference field (seamless rivers/
+ * rainfall) only when this version changes, so painting rounds during a
+ * stroke reuse the cached field and the refresh happens once when the
+ * stroke ends. */
+const envVersion = {wild: 0, city: 0};
+
 
 
 // each parameter is [initial value, low, high]
@@ -58,7 +66,7 @@ const initialParams = {
         ['flow', 0.2, 0, 1],
     ],
     render: [
-        ['zoom', 100/2000, 100/2000, 100/480],
+        ['zoom', 100/2000, 100/2000, 100/512],
         ['x', 2000, 0, 4000],
         ['y', 1000, 0, 2000],
         ['light_angle_deg', 80, 0, 360],
@@ -118,7 +126,7 @@ function main() {
                 getParam()[phase][name] = slider.valueAsNumber;
                 requestAnimationFrame(() => {
                     if (phase == 'render') { redraw(); }
-                    else { generate(); }
+                    else { envVersion[activeScene]++; generate(); }
                 });
             });
 
@@ -268,6 +276,8 @@ function main() {
             tx: tile.tx,
             ty: tile.ty,
             genRect: tile.genRect,
+            rect: tile.rect,
+            refVersion: envVersion[activeScene],
             param: p,
             constraints: {
                 sizeW: Painting.size.w,
@@ -325,6 +335,12 @@ function main() {
             }, getParam().lod.paintDebounceMs ?? 30);
         }
     };
+    /* Stroke finished: refresh the workers' reference field (held back
+     * during the stroke for brush responsiveness) and regenerate. */
+    Painting.onStrokeEnd = () => {
+        envVersion[activeScene]++;
+        generate();
+    };
     render.setCountryNames(Painting.countryNames);
 
     /* Kick off the workers with the world/lod configuration. */
@@ -373,6 +389,7 @@ function main() {
             cityManager.fromJSON(data.cities);
             cityUI.selectedCityId = null;
             cityUI.rebuild();
+            envVersion.wild++; envVersion.city++;
             generate();
         }).catch(err => {
             console.error("import failed", err);

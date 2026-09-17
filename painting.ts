@@ -296,6 +296,9 @@ const sceneNames = () => scenes[activeScene].names;
 let exported = {
     size: {w: CANVAS_WIDTH, h: CANVAS_HEIGHT},
     onUpdate: () => {},
+    /* fired when a paint stroke ends (pointerup/cancel); mapgen4 uses
+     * it to refresh the worker's world-level reference field */
+    onStrokeEnd: () => {},
     screenToWorldCoords: coords => coords,
     setElevationParam: elevationParam => g().setElevationParam(elevationParam),
     userHasPainted: () => g().userHasPainted,
@@ -377,6 +380,7 @@ document.getElementById('button-reset').addEventListener('click', () => {
         if (input) { input.value = ''; }
     }
     exported.onUpdate();
+    exported.onStrokeEnd(); // terrain changed outside a stroke: refresh the reference field
 });
 
 
@@ -615,7 +619,9 @@ function setUpPaintEventHandling() {
     }
 
     function end(_event) {
+        if (!dragging) return;
         dragging = false;
+        exported.onStrokeEnd();
     }
 
     function move(event: PointerEvent) {

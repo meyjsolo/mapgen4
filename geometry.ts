@@ -423,7 +423,7 @@ function setForestCanopyGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array
 function setRiverGeometry(map: Map, spacing: number, riversParam: any, P: Float32Array): number {
     const MIN_FLOW = Math.exp(riversParam.lg_min_flow);
     const RIVER_WIDTH = Math.exp(riversParam.lg_river_width);
-    let {mesh, s_downslope_t, flow_s} = map;
+    let {mesh, s_downslope_t, flow_s, elevation_r} = map;
     let {numSolidTriangles, length_s} = mesh;
 
     function riverSize(s: number, flow: number): number {
@@ -442,20 +442,27 @@ function setRiverGeometry(map: Map, spacing: number, riversParam: any, P: Float3
         let flow_in1 = flow_s[mesh.s_opposite_s(s_in1)];
         let flow_in2 = flow_s[mesh.s_opposite_s(s_in2)];
 
+        /* Each vertex carries the terrain elevation as z so the river
+         * texture is in the same displaced space as the land/drape
+         * passes — otherwise displaced mountain peaks sample the flat
+         * river texture and the river appears to run over the ridge. */
         function add(s1, s2, s3, width1, width2) { // no flow on side s3
             let r1 = mesh.r_begin_s(s1),
                 r2 = mesh.r_begin_s(s2),
                 r3 = mesh.r_begin_s(s3);
             P[p++] = mesh.x_of_r(r1);
             P[p++] = mesh.y_of_r(r1);
+            P[p++] = Math.max(0, elevation_r[r1]);
             P[p++] = width1;
             P[p++] = width2;
             P[p++] = mesh.x_of_r(r2);
             P[p++] = mesh.y_of_r(r2);
+            P[p++] = Math.max(0, elevation_r[r2]);
             P[p++] = width1;
             P[p++] = width2;
             P[p++] = mesh.x_of_r(r3);
             P[p++] = mesh.y_of_r(r3);
+            P[p++] = Math.max(0, elevation_r[r3]);
             P[p++] = width1;
             P[p++] = width2;
         }
@@ -468,7 +475,7 @@ function setRiverGeometry(map: Map, spacing: number, riversParam: any, P: Float3
         }
     }
 
-    return p / 12;
+    return p / 15;
 };
 
 export default {setMeshGeometry, setMapGeometry, setRiverGeometry, setBorderGeometry, setRoadGeometry, setBuildingGeometry, setTreeGeometry, setForestCanopyGeometry};
