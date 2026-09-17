@@ -268,6 +268,14 @@ function main() {
         if (!initialized) return;
         const p = getParam();
         Painting.setElevationParam(p.elevation);
+        /* In the default flat-rectangle mode, force a flat valley floor
+         * and no rivers without touching the slider values, so the
+         * original terrain returns as soon as the user changes the seed. */
+        const workerParam = Painting.isFlatDefault()
+            ? {...p,
+               elevation: {...p.elevation, noisy_coastlines: 0, hill_height: 0},
+               rivers: {...p.rivers, flow: 0}}
+            : p;
         workers[workerRR++ % workers.length].postMessage({
             type: 'genTile',
             key: tile.key,
@@ -278,7 +286,7 @@ function main() {
             genRect: tile.genRect,
             rect: tile.rect,
             refVersion: envVersion[activeScene],
-            param: p,
+            param: workerParam,
             constraints: {
                 sizeW: Painting.size.w,
                 sizeH: Painting.size.h,
