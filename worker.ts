@@ -227,7 +227,7 @@ function handleInit(event) {
 }
 
 function handleGenTile(event) {
-    const {key, scene, lod, tx, ty, rect, genRect, refVersion, param, constraints} = event.data;
+    const {key, scene, lod, tx, ty, rect, genRect, refVersion, param, constraints, needsMesh} = event.data;
     const spacing = baseSpacing * Math.pow(spacingFactor, -lod);
 
     // Reference field: rebuild only when the main thread bumped the version.
@@ -282,14 +282,21 @@ function handleGenTile(event) {
 
     const elapsed = performance.now() - start_time;
 
-    const mesh = serializeMesh(mm.mesh);
+    // The mesh for a tile key never changes (cached above by meshKey), so it
+    // is serialized back only when the main thread doesn't have it yet;
+    // regenerations ship just the map arrays. This keeps painting strokes
+    // from paying a ~1.4MB clone + full mesh deserialization per tile per
+    // round on the main thread.
+    const mesh = needsMesh ? serializeMesh(mm.mesh) : undefined;
     const transferables = [
         quad_elements.buffer,
         a_quad_em.buffer,
         a_river_xyww.buffer,
-        // NOTE: mesh arrays are intentionally NOT transferred — they are
-        // cached on this side and reused for every regeneration.
+        // NOTE: mesh triangles/halfedges are intentionally NOT transferred —
+        // they are cached on this side and reused for every regeneration.
+        // (points IS fresh, so it can go zero-copy.)
     ];
+    if (mesh) transferables.push(mesh.points.buffer);
     worker.postMessage({
         type: 'tileReady',
         key, scene, lod, tx, ty,

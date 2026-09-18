@@ -598,9 +598,37 @@ const frag_preview = `
 // Per-tile geometry + GPU buffers
 
 /* Render resolution. Matches the world aspect (2:1) so the map fills the
- * viewport naturally — no letterboxing, no distortion. */
-const fbo_texture_width: number = 2048;
-const fbo_texture_height: number = 1024;
+ * viewport naturally — no letterboxing, no distortion.
+ *
+ * Sized once at startup to the #map display rect (CSS size × DPR, DPR
+ * capped at 2) so mobile GPUs aren't pushing 4-8x more pixels than the
+ * screen can show; capped at 2048 so desktop never exceeds the historical
+ * size. Pin it for all devices by setting world.canvasSize in config.js. */
+let fbo_texture_width: number = 2048;
+let fbo_texture_height: number = 1024;
+
+function sizeFboTextures(pinnedWidth?: number) {
+    let width = 0;
+    if (pinnedWidth && pinnedWidth > 0) {
+        width = pinnedWidth;
+    } else {
+        const canvas = document.getElementById('mapgen4') as HTMLCanvasElement | null;
+        const w = canvas?.clientWidth ?? 0, h = canvas?.clientHeight ?? 0;
+        if (w > 0 && h > 0) {
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            /* #map keeps a 2:1 aspect ratio; take the larger of the two
+             * axes scaled to 2:1 so neither direction is undersampled if
+             * the CSS layout ever changes */
+            width = Math.ceil(Math.max(w, 2 * h) * dpr);
+        }
+    }
+    if (width > 0) {
+        width = Math.max(512, Math.min(2048, width));
+        if (width % 2) width++; /* keep the 2:1 height an integer */
+        fbo_texture_width = width;
+        fbo_texture_height = width / 2;
+    }
+}
 
 /* Maximum terrain elevation used for scissor expansion. Terrain
  * elevation is clamped to [-1, +1] (map.ts) and the vertex shaders
@@ -703,10 +731,14 @@ export default class Renderer {
 
     tileGeo = new Map<string, TileGeo>();
 
-    constructor (world: WorldManager) {
+    constructor (world: WorldManager, opts?: {canvasSize?: number}) {
         const canvas = document.getElementById('mapgen4') as HTMLCanvasElement;
         this.world = world;
         this.webgl = new WebGLWrapper(canvas);
+
+        /* Size the render targets before anything allocates from or
+         * resizes to them (canvas backing store, FBOs, screenshot). */
+        sizeFboTextures(opts?.canvasSize);
 
         this.resizeCanvas();
 
@@ -828,16 +860,19 @@ export default class Renderer {
 
     /* ---- per-tile geometry handling ---- */
 
+    /* Returns false when the data couldn't be applied (no cached geometry
+     * and no mesh shipped) — the caller re-requests the tile. */
     onTileReady(tile: Tile, data: {
-        mesh: SerializedMesh;
+        mesh?: SerializedMesh;
         a_quad_em: Float32Array;
         quad_elements: Int32Array;
         a_river_xyww: Float32Array;
         numRiverTriangles: number;
-    }, overlays: {borders: boolean; roads: boolean; buildings: boolean; trees: boolean; canopies: boolean}) {
-        const mesh = deserializeMesh(data.mesh);
+    }, overlays: {borders: boolean; roads: boolean; buildings: boolean; trees: boolean; canopies: boolean}): boolean {
         let geo = this.tileGeo.get(tile.key);
         if (!geo) {
+            if (!data.mesh) return false;
+            const mesh = deserializeMesh(data.mesh);
             geo = {
                 mesh,
                 a_quad_xy: new Float32Array(2 * (mesh.numRegions + mesh.numTriangles)),
@@ -857,15 +892,19 @@ export default class Renderer {
             Geometry.setMeshGeometry(mesh, geo.a_quad_xy);
             this.tileGeo.set(tile.key, geo);
         } else {
-            geo.mesh = mesh;
+            /* the mesh for a tile key never changes across regenerations
+             * (the worker caches it), so keep the cached mesh and only
+             * swap in the per-regen arrays — this skips the ~1.4MB mesh
+             * clone + deserializeMesh (tens of ms on mobile) per tile */
             geo.a_quad_em = data.a_quad_em;
             geo.quad_elements = data.quad_elements;
-            geo.quad_elements_length = 3 * mesh.numSolidSides;
+            geo.quad_elements_length = 3 * geo.mesh.numSolidSides;
             geo.a_river_xyww = data.a_river_xyww;
             geo.numRiverTriangles = data.numRiverTriangles;
             geo.dirty = true;
         }
         this.computeTileOverlays(geo, overlays);
+        return true;
     }
 
     computeTileOverlays(geo: TileGeo, overlays: {borders: boolean; roads: boolean; buildings: boolean; trees: boolean; canopies: boolean}) {

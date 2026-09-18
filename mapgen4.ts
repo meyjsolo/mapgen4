@@ -96,8 +96,12 @@ const initialParams = {
  */
 function main() {
     const world = new WorldManager(getParam());
-    const render = new Renderer(world);
-    render.bench = new Bench(baseParam.benchmark.enabled);
+    const render = new Renderer(world, {canvasSize: baseParam.world.canvasSize});
+    /* benchmark HUD + continuous rendering are opt-in (?bench=1); leaving
+     * them off keeps the renderer demand-driven (no per-frame work when
+     * nothing changed), which matters a lot on mobile */
+    const benchParam = new URLSearchParams(window.location.search).get('bench');
+    render.bench = new Bench(baseParam.benchmark.enabled || benchParam === '1');
     const cityManager = new CityManager();
     const cityUI = new CityUI(render, cityManager);
     render.cityUI = cityUI;
@@ -249,14 +253,22 @@ function main() {
             if (d.type === 'tileReady') {
                 const tile = world.tiles.get(d.key);
                 if (!tile) return; /* tile was evicted while generating */
-                world.markTileReady(d.key, d);
-                render.onTileReady(tile, d, {
+                /* Apply the data before markTileReady: a regeneration it
+                 * triggers (state 'regen') must see the mesh we already
+                 * hold so the re-request skips resending it. */
+                if (!render.onTileReady(tile, d, {
                     borders: Painting.countryHasPainted(),
                     roads: d.scene === 'city',
                     buildings: d.scene === 'city',
                     trees: d.scene === 'city',
                     canopies: d.scene === 'wild',
-                });
+                })) {
+                    /* we no longer hold the geometry for this tile (evicted)
+                     * but the worker wasn't asked for the mesh — mark for
+                     * regeneration so the next update re-requests it */
+                    tile.state = 'regen';
+                }
+                world.markTileReady(d.key, d);
                 if (render.bench) render.bench.reportGen(d.elapsed);
                 redraw();
             }
@@ -287,6 +299,10 @@ function main() {
             rect: tile.rect,
             refVersion: envVersion[activeScene],
             param: workerParam,
+            /* the mesh never changes per tile key: ask the worker to ship it
+             * only when we don't already hold the geometry (first request or
+             * after an LRU eviction); regenerations send just the map arrays */
+            needsMesh: !render.tileGeo.has(tile.key),
             constraints: {
                 sizeW: Painting.size.w,
                 sizeH: Painting.size.h,

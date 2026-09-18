@@ -30,6 +30,9 @@ export default {
         baseTilesPerAxis: 4, /* LOD 0 tiles per X axis; LOD L: baseTilesPerAxis*2^L */
         maxTiles: 24,        /* LRU cache size (each tile ~30k cells) */
         maxWorkers: 4,       /* parallel generation workers (tiles are distributed round-robin) */
+        /* canvasSize: 2048,    optional: pin the render-target width for all devices.
+                                Default: auto-sized to the #map display rect x DPR (capped at 2048)
+                                so mobile GPUs render at the screen's actual resolution. */
         paintCanvasSize: 512,/* painting constraint canvas width; the height is derived from the
                                 world aspect so brushes keep the same geographic scale */
     },
@@ -56,6 +59,7 @@ export default {
     render: {
     },
     benchmark: {
-        enabled: true,
+        enabled: false,     /* off by default: also opt in at runtime via ?bench=1
+                               (enables the timing HUD + continuous rendering) */
     },
 };

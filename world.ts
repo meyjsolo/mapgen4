@@ -26,6 +26,10 @@ export interface Tile {
     lastUsed: number;
 }
 
+/* LOD calibration reference width (NOT the render resolution — the FBO
+ * size is dynamic, see render.ts sizeFboTextures). Keeps zoomNative and
+ * therefore tile selection identical on every device; small screens still
+ * select the same tiles as desktop at the same zoom. */
 const CANVAS_SIZE = 2048;
 
 export class WorldManager {
