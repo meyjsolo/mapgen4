@@ -1381,7 +1381,7 @@ export default class Renderer {
             for (const tile of tiles) {
                 const geo = this.tileGeo.get(tile.key);
                 if (!geo) continue;
-                this.scissorTile(tile, TERRAIN_Z_MAX);
+                this.scissorTile(tile, scissorMaxElevation);
                 this.drawTileLand(geo, renderParam.outline_water);
                 this.endScissor();
             }
@@ -1389,7 +1389,7 @@ export default class Renderer {
                 for (const tile of tiles) {
                     const geo = this.tileGeo.get(tile.key);
                     if (!geo) continue;
-                    this.scissorTile(tile, TERRAIN_Z_MAX);
+                    this.scissorTile(tile, scissorMaxElevation);
                     this.drawTileDepth(geo);
                     this.endScissor();
                 }
@@ -1411,7 +1411,7 @@ export default class Renderer {
             for (const tile of tiles) {
                 const geo = this.tileGeo.get(tile.key);
                 if (!geo) continue;
-                this.scissorTile(tile, TERRAIN_Z_MAX);
+                this.scissorTile(tile, scissorMaxElevation);
                 this.drawTileDrape(geo, renderParam);
                 this.endScissor();
             }
