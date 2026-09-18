@@ -44,6 +44,8 @@ export default {
         maxInflight: 12,     /* max tiles in generation flight (across all workers) */
         paintDebounceMs: 30, /* delay before a regeneration round fires while painting */
         paintPreview: false, /* live colored brush overlay (optional; original feel = off) */
+        referenceSpacing: 22,/* whole-world reference field resolution (= spacing at minLevel)
+                                used for seamless rivers/rainfall across tiles */
     },
     elevation: {
     },

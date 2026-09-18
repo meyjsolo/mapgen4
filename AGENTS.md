@@ -4,11 +4,11 @@ Mapgen4 is a browser-based procedural map generator (Red Blob Games). Written in
 
 ## Build / run
 
-- Build: `./build.sh`. Requires `esbuild` on PATH (README says `npm install -g esbuild`; it is also in `dependencies`, so `npm install` puts it in `node_modules/.bin`).
+- Build: `./build.sh`. Requires `esbuild` on PATH; it is **not** in `package.json` `dependencies`, so install it globally (`npm install -g esbuild`, per README.org).
 - Dev: serve the repo root, e.g. `python3 -m http.server 8000`, then open `embed.html` (not `index.html`; there is none — it's gitignored).
 - Deploy: push to `main` triggers `.github/workflows/pages.yml` which runs `./build.sh` and deploys `embed.html` + `build/` to GitHub Pages. CI installs esbuild globally.
 
-There is **no lint, no typecheck, and no test command**. esbuild does not type-check, and `typescript` is not installed anywhere, so "typechecking" is IDE-only (per README). Verify changes by building and opening the page in a browser. Type declarations (`.d.ts`) exist for the IDE.
+There is **no lint, no typecheck, and no test command**. esbuild does not type-check, and `typescript` is not installed anywhere, so "typechecking" is IDE-only (per README.org). Verify changes by building and opening the page in a browser. Type declarations (`.d.ts`) exist for the IDE. `tsconfig.json` covers `*.ts` (with `allowImportingTsExtensions`); `jsconfig.json` separately enables IDE checking of `*.js` files like `config.js`.
 
 ## Build artifacts
 
@@ -20,21 +20,29 @@ There is **no lint, no typecheck, and no test command**. esbuild does not type-c
 ## Conventions to preserve
 
 - **Explicit `.ts` extensions on relative imports** everywhere (`./map.ts`, `./dual-mesh/index.ts`). TS libs/dual-mesh authored under `tsconfig.json` with `allowImportingTsExtensions`. Don't strip or add them inconsistently.
-- **Modify `config.js` (not hardcoded values)**: `world.size` (default 4000; 4×4 = 16× the original area) and `lod.*` control the tile pyramid. `world.baseSpacing` (5.5) is the native detail scale = `config.spacing`. `mesh.seed` drives the world-level mountain peaks in the worker.
+- **Modify `config.js` (not hardcoded values)**: `world.width`/`world.height` (4000×2000, 2:1 aspect; 8× the original 1000×1000 area) and `lod.*` control the tile pyramid. `world.baseSpacing` (5.5) is the native detail scale = `config.spacing`. `mesh.seed` drives the world-level mountain peaks in the worker.
 - Every source file starts with an Apache-2.0 Red Blob Games header comment; keep it on new files.
 - `param` object — UI sliders are declared in `mapgen4.ts`'s `initialParams` and merged into `config.js` sections at runtime.
 
+## Two scenes: wild and city
+
+The app runs **two fully independent maps** ("scenes") with a toggle in the UI (`mapgen4.ts`): the wild world map and a city map. Each scene has its own deep-copied param set (`params.wild` / `params.city`); the city scene overrides the seed (424242), flattens terrain (`island` 0.5, tiny `hill_height`), and boosts `render.mountain_height` (4) so buildings read vertically. Some sliders (road/tree densities) are city-only and hidden in the wild scene. The worker caches `Map` instances **per scene**, and painting/overlay state is scene-aware.
+
 ## Code map
 
-- `mapgen4.ts` — entrypoint/UI wiring; creates the `WorldManager` + `Renderer`, talks to the worker (init + per-tile genTile messages).
+- `mapgen4.ts` — entrypoint/UI wiring; creates the `WorldManager` + `Renderer`, talks to the worker (init + per-tile genTile messages). Owns the wild/city scene toggle and per-scene params.
 - `world.ts` — `WorldManager`: quadtree tile pyramid, LOD selection from zoom, viewport culling, LRU tile cache, painting invalidation. Every tile at every LOD holds ~same cell count (native detail scale), so detail is consistent and visible cells stay bounded.
 - `tile-mesh.ts` — builds one tile's `TriangleMesh` in the worker (Delaunator + ghost structure). Interior points use a **deterministic jittered-staggered grid** (`generate-points.ts` `jitteredGridPoints`) so adjacent tiles generate identical points in their shared apron — the Delaunay triangulation matches across seams (seamless tiles). Mountain peaks (world-level shared set) are mapped to their nearest region.
 - `mesh-extras.ts` — serialize/deserialize `TriangleMesh` across the worker boundary + `addMeshExtras` (is_boundary_t, length_s).
-- `worker.ts` — map generation in the worker; per-tile `genTile` messages; caches tile meshes and per-scene `Map` instances; scales `lg_min_flow` per LOD (river continuity).
+- `worker.ts` — map generation in the worker; per-tile `genTile` messages; caches tile meshes and per-scene `Map` instances; scales `lg_min_flow` per LOD (river continuity). Also maintains a per-scene **world-level reference field** (coarse whole-world `Map` at `lod.referenceSpacing`): tiles sample rainfall from it and seed apron-triangle flow from it so rivers/rainfall stay seamless across tiles. Rebuilt only when the main thread bumps `refVersion` (deferred while the brush is down; refreshed on stroke end via `Painting.onStrokeEnd`).
 - `map.ts` — terrain algorithms (elevation, rainfall, rivers); now world-size-parameterized.
-- `painting.ts` — user brush painting → constraints.
+- `painting.ts` — user brush painting → constraints. Beyond elevation, brushes also paint countries, terrains, city zones, and packed object-layer bits (see the constants files below).
+- `countries.ts` — country-painting palette constants (`NUM_COUNTRIES` = 8; region ids are -1 = none or 0..7 into `countryPalette`).
+- `terrains.ts` — independent terrain-paint types (`TERRAIN_SNOW/GRASS/FOREST/DESERT`; 0 = automatic biome from elevation/moisture) + `terrainPalette`.
+- `city.ts` — city layout constants: zone ids (`CITY_WATER/PARK/RESIDENTIAL/COMMERCIAL`, -1 = unpainted → automatic seeded layout in `Map.assignCity()`) and bit-packed object-layer encoding.
+- `colormap.ts` — biome colormap texture (indexed by elevation × rainfall) used by the renderer.
 - `cities.ts` — city data model (`City` + `CityManager`: create/update/delete/get), independent of terrain, positions in world coordinates.
-- `city-ui.ts` — city marker/label DOM overlay (positioned each frame from world coords via `render.worldToScreen`), pointer-based interaction: tap = select/deselect, long-press/right-click = context menu (创建/编辑/删除城市), dialogs, selection state.
+- `city-ui.ts` — city edit panel (`#city-panel`, right side): create/rename/delete via panel + dialogs; drag a panel item onto the map to place/re-place the city; city marker/label DOM overlay (positioned each frame from world coords via `render.worldToScreen`), tap = select/deselect, drag a marker = move the city. Unplaced cities (`City.placed === false`) show only in the panel.
 - `render.ts` — WebGL2 renderer; screen-space adaptive pipeline (renders only visible tiles per frame into 2048² framebuffers), per-tile GPU buffers, viewport culling, LOD fallback.
 - `generate-points.ts` / `serialize-points.ts` — point precomputation (legacy) + per-tile/peak helpers (`chooseTilePoints`, `generateMountainPeaks`).
 - `geometry.ts` — shared worker+render geometry math; fills the QuadGeometry buffers.

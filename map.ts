@@ -581,11 +581,11 @@ export default class Map {
         }
     }
 
-    assignRivers(riversParam) {
+    assignRivers(riversParam, externalFlow_t?: Float32Array) {
         let {mesh, moisture_t, rainfall_r, elevation_t, s_downslope_t, t_order, flow_t, flow_s} = this;
         assignDownslope(mesh, elevation_t, s_downslope_t, t_order);
         assignMoisture(mesh, rainfall_r, moisture_t);
-        assignFlow(mesh, riversParam, t_order, elevation_t, moisture_t, s_downslope_t, flow_t, flow_s);
+        assignFlow(mesh, riversParam, t_order, elevation_t, moisture_t, s_downslope_t, flow_t, flow_s, externalFlow_t);
     }
 }
 
@@ -652,15 +652,19 @@ function assignMoisture(mesh: Mesh, rainfall_r: Float32Array, /* out */ moisture
 }
 
 
-function assignFlow(mesh: Mesh, riversParam: any, t_order: Int32Array, elevation_t: Float32Array, moisture_t: Float32Array, s_downslope_t: Int32Array, /* out */ flow_t: Float32Array, /* out */ flow_s: Float32Array) {
+function assignFlow(mesh: Mesh, riversParam: any, t_order: Int32Array, elevation_t: Float32Array, moisture_t: Float32Array, s_downslope_t: Int32Array, /* out */ flow_t: Float32Array, /* out */ flow_s: Float32Array, externalFlow_t?: Float32Array) {
     let {numTriangles, _halfedges} = mesh;
     flow_s.fill(0);
     for (let t = 0; t < numTriangles; t++) {
+        /* externalFlow_t seeds water flowing in from outside the tile
+         * (world-level reference field, apron triangles only) so rivers
+         * continue across tile seams instead of restarting */
+        let flow = 0;
         if (elevation_t[t] >= 0.0) {
-            flow_t[t] = riversParam.flow * moisture_t[t] * moisture_t[t];
-        } else {
-            flow_t[t] = 0;
+            flow = riversParam.flow * moisture_t[t] * moisture_t[t]
+                 + (externalFlow_t ? externalFlow_t[t] : 0);
         }
+        flow_t[t] = flow;
     }
     for (let i = t_order.length-1; i >= 0; i--) {
         let t_tributary = t_order[i];

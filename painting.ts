@@ -42,6 +42,10 @@ const currentStroke = {
 /* The elevation is -1.0 to 0.0 → water, 0.0 to +1.0 → land */
 class Generator {
     seed = 0;
+    /* The seed the scene started with. As long as the seed stays at
+     * this value the map is the default flat rectangle; changing the
+     * seed manually switches to the original noise-based island. */
+    initialSeed: number | null = null;
     island = 0;
     userHasPainted = false;
     elevation: Float32Array;
@@ -67,6 +71,7 @@ class Generator {
     }
 
     setElevationParam(elevationParam) {
+        if (this.initialSeed === null) { this.initialSeed = elevationParam.seed; }
         if (   elevationParam.seed   !== this.seed
             || elevationParam.island !== this.island) {
             this.seed   = elevationParam.seed;
@@ -75,8 +80,50 @@ class Generator {
         }
     }
     
-    /** Use a noise function to determine the shape */
+    /**
+     * Default (seed untouched): flat rectangular valley surrounded by
+     * ocean, land = 90% of the area. Once the user changes the seed
+     * manually, fall back to the original noise-based island shape.
+     */
     generate() {
+        if (this.seed === this.initialSeed) {
+            this.generateFlatRectangle();
+        } else {
+            this.generateNoiseIsland();
+        }
+
+        this.userHasPainted = false;
+        this.country.fill(-1);
+        this.countryHasPainted = false;
+        this.city.fill(-1);
+        this.cityHasPainted = false;
+        this.objects.fill(0);
+        this.objectsHasPainted = false;
+        this.terrain.fill(0);
+        this.terrainHasPainted = false;
+    }
+
+    /** Flat rectangular valley surrounded by ocean (land = 90% of area) */
+    generateFlatRectangle() {
+        const {elevation} = this;
+        /* Centered rectangle covering 90% of the total area: scale both
+         * axes by sqrt(0.9) so the land fraction is exactly 0.9. */
+        const LAND_HALF = Math.sqrt(0.9);
+        for (let y = 0; y < CANVAS_HEIGHT; y++) {
+            for (let x = 0; x < CANVAS_WIDTH; x++) {
+                let p = y * CANVAS_WIDTH + x;
+                let nx = 2 * x/CANVAS_WIDTH - 1,
+                    ny = 2 * y/CANVAS_HEIGHT - 1;
+                let distance = Math.max(Math.abs(nx), Math.abs(ny));
+                /* Small positive elevation = flat valley floor; deep
+                 * negative outside the rectangle = surrounding ocean. */
+                elevation[p] = distance < LAND_HALF ? 0.05 : -1.0;
+            }
+        }
+    }
+
+    /** Use a noise function to determine the shape (original mapgen4) */
+    generateNoiseIsland() {
         const {elevation, island} = this;
         const noise2D = createNoise2D(makeRandFloat(this.seed));
         const persistence = 1/2;
@@ -113,16 +160,6 @@ class Generator {
                 }
             }
         }
-
-        this.userHasPainted = false;
-        this.country.fill(-1);
-        this.countryHasPainted = false;
-        this.city.fill(-1);
-        this.cityHasPainted = false;
-        this.objects.fill(0);
-        this.objectsHasPainted = false;
-        this.terrain.fill(0);
-        this.terrainHasPainted = false;
     }
 
     /**
@@ -296,8 +333,14 @@ const sceneNames = () => scenes[activeScene].names;
 let exported = {
     size: {w: CANVAS_WIDTH, h: CANVAS_HEIGHT},
     onUpdate: () => {},
+    /* fired when a paint stroke ends (pointerup/cancel); mapgen4 uses
+     * it to refresh the worker's world-level reference field */
+    onStrokeEnd: () => {},
     screenToWorldCoords: coords => coords,
     setElevationParam: elevationParam => g().setElevationParam(elevationParam),
+    /* true while the seed is untouched → the default flat rectangle;
+     * false once the user picks a different seed (noise island mode) */
+    isFlatDefault: () => g().seed === g().initialSeed,
     userHasPainted: () => g().userHasPainted,
     countryHasPainted: () => g().countryHasPainted,
     cityHasPainted: () => g().cityHasPainted,
@@ -377,6 +420,7 @@ document.getElementById('button-reset').addEventListener('click', () => {
         if (input) { input.value = ''; }
     }
     exported.onUpdate();
+    exported.onStrokeEnd(); // terrain changed outside a stroke: refresh the reference field
 });
 
 
@@ -615,7 +659,9 @@ function setUpPaintEventHandling() {
     }
 
     function end(_event) {
+        if (!dragging) return;
         dragging = false;
+        exported.onStrokeEnd();
     }
 
     function move(event: PointerEvent) {
