@@ -601,6 +601,14 @@ const frag_preview = `
 const fbo_texture_width: number = 2048;
 const fbo_texture_height: number = 1024;
 
+/* Maximum terrain elevation used for scissor expansion. Terrain
+ * elevation is clamped to [-1, +1] (map.ts) and the vertex shaders
+ * apply max(0.0, a_em.x), so +1.0 is the largest Z-displacement a
+ * vertex can have. The scissor is inflated to cover a peak at this
+ * height so it is not clipped by its own tile's z=0 footprint and
+ * then overwritten by a neighbor tile's low terrain. */
+const scissorMaxElevation: number = 1.0;
+
 type TileGeo = {
     mesh: Mesh;
     a_quad_xy: Float32Array;
@@ -735,7 +743,17 @@ export default class Renderer {
 
         this.texture_colormap = this.webgl.createTexture({data: colormap.data, width: colormap.width, height: colormap.height, filter: 'nearest'});
 
-        this.fbo_land  = this.webgl.createFramebuffer(fbo_texture_width, fbo_texture_height, {depth: false, internalFormat: this.webgl.gl.R16F, filter: 'linear'});
+        // fbo_land needs a depth buffer. The land pass (vert_land) Z-
+        // displaces vertices by elevation, same as the drape pass. Without
+        // depth, fbo_land is last-write-wins: a mountain summit projected
+        // (via the oblique skew projection[9]=1) into a neighboring tile's
+        // z=0 screen footprint gets its elevation overwritten by that
+        // neighbor's low/water land pass, so the drape fragment shader
+        // reads a water elevation at the summit and colors it as water
+        // ("mountain underwater"). With depth + LEQUAL, the summit (clip-z
+        // = -sz*e, more negative = closer) wins over flat water (clip-z=0),
+        // matching how fbo_drape already resolves it.
+        this.fbo_land  = this.webgl.createFramebuffer(fbo_texture_width, fbo_texture_height, {depth: true, internalFormat: this.webgl.gl.R16F, filter: 'linear'});
         this.fbo_depth = this.webgl.createFramebuffer(fbo_texture_width, fbo_texture_height, {depth: true, internalFormat: this.webgl.gl.R16F, filter: 'nearest'});
         this.fbo_river = this.webgl.createFramebuffer(fbo_texture_width, fbo_texture_height, {depth: false, filter: 'linear'});
         this.fbo_drape = this.webgl.createFramebuffer(fbo_texture_width, fbo_texture_height, {depth: true, filter: 'linear'});
@@ -956,7 +974,15 @@ export default class Renderer {
     }
 
     /* Clip rendering to the tile's visible world rect so halo geometry
-     * does not bleed into neighboring tiles. */
+     * does not bleed into neighboring tiles. The scissor bbox is computed
+     * from the tile's world rect corners projected at both z=0 (base) and
+     * z=maxElevation (peak), and the two bboxes are merged. Terrain
+     * vertices are Z-displaced by elevation in the vertex shaders
+     * (vert_land/vert_depth/vert_drape), and the projection has an oblique
+     * skew (projection[9]=1) that maps world-z onto screen-Y. Projecting
+     * only at z=0 would clip mountain peaks that rise above their tile's
+     * flat footprint — the neighbor tile would then overwrite the peak
+     * with its own low-elevation terrain. */
     private scissorTile(tile: Tile) {
         const {gl} = this.webgl;
         const [x0, y0, w, h] = tile.rect;
@@ -965,6 +991,14 @@ export default class Renderer {
         let minX = 1, maxX = -1, minY = 1, maxY = -1;
         for (const [cx, cy] of corners) {
             vec4.transformMat4(v, vec4.fromValues(cx, cy, 0, 1), this.projection);
+            if (v[0] < minX) minX = v[0];
+            if (v[0] > maxX) maxX = v[0];
+            if (v[1] < minY) minY = v[1];
+            if (v[1] > maxY) maxY = v[1];
+            // Project the same corner at peak elevation (z=1.0) and merge
+            // so the scissor covers the screen region where a mountain
+            // summit can land after the Z-displacement + oblique skew.
+            vec4.transformMat4(v, vec4.fromValues(cx, cy, scissorMaxElevation, 1), this.projection);
             if (v[0] < minX) minX = v[0];
             if (v[0] > maxX) maxX = v[0];
             if (v[1] < minY) minY = v[1];
@@ -1257,6 +1291,13 @@ export default class Renderer {
         const clearBuffers = () => {
             this.fbo_river.clear(0, 0, 0, 0);
             this.fbo_depth.clear(0, 0, 0, 1);
+            // fbo_land stores e = 0.5*(1+v_e) (frag_land). 0.5 = elevation 0
+            // (sea level) so any pixel not covered by a tile's land pass
+            // (e.g. a mountain peak projected outside its tile's z=0
+            // footprint before the scissor was expanded, or residual
+            // uncovered pixels) reads a neutral coast/flat-land elevation
+            // instead of the previous frame's stale value.
+            this.fbo_land.clear(0.5, 0, 0, 0);
             this.fbo_drape.clear(0.3, 0.3, 0.35, 1);
             this.fbo_border.clear(0, 0, 0, 0);
             this.fbo_road.clear(0, 0, 0, 0);
