@@ -234,12 +234,13 @@ export default class Map {
 
     /**
      * Assign city zones from the painted low-res constraint canvas.
-     * Painted cells win; every non-painted region gets an automatic
-     * zone (water along coast/lakes, commercial near the center,
-     * residential around it, park on the outskirts). Must be called
-     * after assignElevation() so auto zones can see elevation_r.
+     * Painted cells win; when autoLayout is on, every non-painted region
+     * gets an automatic zone (water along coast/lakes, commercial near
+     * the center, residential around it, park on the outskirts); when
+     * off, unpainted regions stay CITY_NONE. Must be called after
+     * assignElevation() so auto zones can see elevation_r.
      */
-    assignCity(cityGrid: Float32Array, sizeW: number, sizeH: number) {        let {mesh, city_t, city_r, elevation_r} = this;
+    assignCity(cityGrid: Float32Array, sizeW: number, sizeH: number, autoLayout: boolean = true) {        let {mesh, city_t, city_r, elevation_r} = this;
         let {numSolidTriangles} = mesh;
         const halfW = this.worldWidth / 2, halfH = this.worldHeight / 2;
 
@@ -275,7 +276,7 @@ export default class Map {
                 let count = ++votes[c];
                 if (count > bestCount) { bestCount = count; best = c; }
             }
-            city_r[r] = best >= 0 ? best : autoZone(r);
+            city_r[r] = best >= 0 ? best : (autoLayout ? autoZone(r) : CITY_NONE);
         }
 
         // Fill in unpainted triangles with the majority zone of their
@@ -293,7 +294,7 @@ export default class Map {
                 const count = ++votes[c];
                 if (count > bestZoneCount) { bestZoneCount = count; bestZone = c; }
             }
-            city_t[t] = bestZone >= 0 ? bestZone : CITY_PARK;
+            city_t[t] = bestZone >= 0 ? bestZone : (autoLayout ? CITY_PARK : CITY_NONE);
         }
     }
 

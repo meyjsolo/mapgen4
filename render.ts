@@ -344,7 +344,7 @@ const vert_drape = `
     out float v_z;
     flat out float v_country;
     out float v_zone;
-    out float v_terrain;
+    flat out float v_terrain;
     out float v_terrainweight;
     void main() {
         v_em = a_em;
@@ -390,7 +390,7 @@ const frag_drape = `
     in float v_z;
     flat in float v_country;
     in float v_zone;
-    in float v_terrain;
+    flat in float v_terrain;
     in float v_terrainweight;
     out vec4 out_fragcolor;
 
@@ -465,10 +465,76 @@ const frag_drape = `
         // palette color. v_terrain is the integer label (0=auto,
         // 1=snow, 2=grass, 3=forest, 4=desert); v_terrainweight is a
         // distance-based blend so the edge fades instead of cutting.
+        //
+        // Desert (label 4) is special-cased: instead of a flat palette
+        // tint, sample the colormap once at forced-low rainfall while
+        // keeping the current elevation z. The painted desert then
+        // inherits the colormap's elevation-aware color — coast bands
+        // near sea level, snow whitening on high desert — rather than a
+        // single flat sandy RGB.
+        //
+        // The blend into biome_color is done in COLOR space (mix two
+        // colors by weight), NOT in rainfall space. Driving the rainfall
+        // coordinate toward desert interpolates m through the colormap's
+        // green mid-rainfall zone (~0.4), which lights up a green ring
+        // at the paint edge; combined with the orographic noise in
+        // v_em.y and the weight field aliasing at coarse LOD, that ring
+        // reads as green jagged burrs, very visible zoomed out. A
+        // straight color blend to the fixed desert sample sidesteps the
+        // green zone entirely.
         if (v_terrain > 0.5 && v_terrainweight > 0.001) {
             int ti = int(clamp(floor(v_terrain + 0.5), 0.0, 4.0));
-            vec3 terrain_color = u_terrainpalette[ti];
-            biome_color = mix(biome_color, terrain_color, v_terrainweight);
+            if (ti == 4) {
+                vec3 desert_base = texture(u_colormap, vec2(z, 0.04)).rgb;
+                // Grade the rim toward an earthy yellow-brown (土黄) as
+                // the paint weight falls: the desert interior stays light
+                // sandy while the edge darkens and warms into a soil tone
+                // before handing off to the surrounding biome, so the
+                // transition reads as a natural gradient instead of a
+                // flat tint abutting green.
+                vec3 earthy = vec3(0.64, 0.53, 0.20);
+                vec3 desert_color = mix(desert_base, earthy, 1.0 - v_terrainweight);
+                // Warm the whole desert toward a saturated yellow for a
+                // richer sand tone (center and rim alike).
+                desert_color = mix(desert_color, vec3(0.82, 0.68, 0.26), 0.25);
+                desert_color = mix(neutral_biome_color, desert_color, u_biome_colors);
+                biome_color = mix(biome_color, desert_color, v_terrainweight);
+            } else if (ti == 2) {
+                vec3 grass_base = texture(u_colormap, vec2(z, 0.55)).rgb;
+                // Same pattern as the desert branch: the interior stays
+                // light (fresh grass) while the rim deepens toward a
+                // drier olive-green before handing off to the
+                // surrounding biome, so the transition reads as a soil
+                // gradient instead of a flat tint.
+                vec3 earthy = vec3(0.28, 0.34, 0.14);
+                vec3 grass_color = mix(grass_base, earthy, 1.0 - v_terrainweight);
+                // Freshen the whole grassland toward a saturated green
+                // (the colormap's land greens run yellowish).
+                grass_color = mix(grass_color, vec3(0.40, 0.58, 0.20), 0.25);
+                grass_color = mix(neutral_biome_color, grass_color, u_biome_colors);
+                biome_color = mix(biome_color, grass_color, v_terrainweight);
+            } else if (ti == 1) {
+                // The snow label is gated at stamp time by minElevation
+                // (painting.ts: paintTerrainAt only stamps where the
+                // elevation constraint has risen past 0.3), so wherever
+                // this label is present a mountain is forming — no extra
+                // elevation gate needed here. Sample the colormap in
+                // its high-elevation whitening zone (forced z) keeping
+                // the natural rainfall, so the snow is a soft off-white
+                // with a faint tint instead of glaring pure white. Grade
+                // the rim toward a cool shadowed gray-blue so the snow
+                // edge melts into the surrounding biome, then
+                // darken/cool so it reads as snow, not glare.
+                vec3 snow_base = texture(u_colormap, vec2(0.82, v_em.y)).rgb;
+                vec3 shadow = vec3(0.55, 0.58, 0.65);
+                vec3 snow_color = mix(snow_base, shadow, 1.0 - v_terrainweight);
+                snow_color = mix(snow_color, vec3(0.70, 0.74, 0.82), 0.25);
+                snow_color = mix(neutral_biome_color, snow_color, u_biome_colors);
+                biome_color = mix(biome_color, snow_color, v_terrainweight);
+            } else {
+                vec3 terrain_color = u_terrainpalette[ti];
+                biome_color = mix(biome_color, terrain_color, v_terrainweight);
+            }
         }
 
         // Tint land with the country color and draw dark national borders
@@ -680,6 +746,9 @@ type TileGpu = {
 export default class Renderer {
     numRiverTriangles: number = 0;
     treeDensity: number = 1;
+    /* false = no zone-driven automatic roads/buildings/trees; only
+     * painted object brushes appear (config.js city.autoObjects) */
+    autoObjects: boolean = true;
 
     world: WorldManager;
     projection: mat4;
@@ -868,7 +937,7 @@ export default class Renderer {
         quad_elements: Int32Array;
         a_river_xyww: Float32Array;
         numRiverTriangles: number;
-    }, overlays: {borders: boolean; roads: boolean; buildings: boolean; trees: boolean; canopies: boolean}): boolean {
+    }, overlays: {borders: boolean; roads: boolean; buildings: boolean; trees: boolean; canopies: boolean; autoObjects?: boolean}): boolean {
         let geo = this.tileGeo.get(tile.key);
         if (!geo) {
             if (!data.mesh) return false;
@@ -907,23 +976,24 @@ export default class Renderer {
         return true;
     }
 
-    computeTileOverlays(geo: TileGeo, overlays: {borders: boolean; roads: boolean; buildings: boolean; trees: boolean; canopies: boolean}) {
+    computeTileOverlays(geo: TileGeo, overlays: {borders: boolean; roads: boolean; buildings: boolean; trees: boolean; canopies: boolean; autoObjects?: boolean}) {
         const {mesh} = geo;
+        this.autoObjects = overlays.autoObjects ?? true;
         if (overlays.borders) {
             if (!geo.a_border_xy) geo.a_border_xy = new Float32Array(18 * mesh.numSolidSides);
             geo.numBorderSegments = Geometry.setBorderGeometry(mesh, geo.a_quad_em, geo.a_border_xy);
         }
         if (overlays.roads) {
             if (!geo.a_road_xy) geo.a_road_xy = new Float32Array(12 * mesh.numSolidSides);
-            geo.numRoadSegments = Geometry.setRoadGeometry(mesh, geo.a_quad_em, geo.a_road_xy);
+            geo.numRoadSegments = Geometry.setRoadGeometry(mesh, geo.a_quad_em, geo.a_road_xy, this.autoObjects);
         }
         if (overlays.buildings) {
             if (!geo.a_buildings) geo.a_buildings = new Float32Array(180 * mesh.numSolidRegions);
-            geo.numBuildings = Geometry.setBuildingGeometry(mesh, geo.a_quad_em, geo.a_buildings);
+            geo.numBuildings = Geometry.setBuildingGeometry(mesh, geo.a_quad_em, geo.a_buildings, this.autoObjects);
         }
         if (overlays.trees) {
             if (!geo.a_trees) geo.a_trees = new Float32Array(108 * mesh.numSolidRegions);
-            geo.numTrees = Geometry.setTreeGeometry(mesh, geo.a_quad_em, geo.a_trees, this.treeDensity);
+            geo.numTrees = Geometry.setTreeGeometry(mesh, geo.a_quad_em, geo.a_trees, this.treeDensity, this.autoObjects);
         }
         if (overlays.canopies) {
             if (!geo.a_forest_canopies) geo.a_forest_canopies = new Float32Array(108 * mesh.numSolidRegions);
@@ -936,7 +1006,7 @@ export default class Renderer {
         const geo = this.tileGeo.get(tile.key);
         if (!geo) return;
         if (!geo.a_trees) geo.a_trees = new Float32Array(108 * geo.mesh.numSolidRegions);
-        geo.numTrees = Geometry.setTreeGeometry(geo.mesh, geo.a_quad_em, geo.a_trees, this.treeDensity);
+        geo.numTrees = Geometry.setTreeGeometry(geo.mesh, geo.a_quad_em, geo.a_trees, this.treeDensity, this.autoObjects);
         geo.dirty = true;
     }
 

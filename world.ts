@@ -173,7 +173,13 @@ export class WorldManager {
         if (!tile) tile = this.makeTile(level, tx, ty);
         tile.lastUsed = this.frame;
         if (tile.state === 'empty' || tile.state === 'regen') {
-            tile.state = 'empty';
+            /* Keep the 'regen' marker: when a round for this tile is
+             * already in flight, request() drops the duplicate here, and
+             * markTileReady still sees 'regen' when that round lands, so
+             * it schedules a catch-up round with the newer constraints.
+             * Resetting the state to 'empty' would erase the marker and
+             * silently lose every update painted after the in-flight
+             * round's snapshot. */
             this.request(tile);
         }
         return tile;
@@ -260,6 +266,9 @@ export class WorldManager {
     hasPendingWork(): boolean {
         for (const tile of this.tiles.values()) {
             if (tile.state === 'queued' || tile.state === 'generating') return true;
+            /* 'regen' on a tile whose round is still in flight counts as
+             * pending too (invalidateRect marked it while generating) */
+            if (tile.state === 'regen' && this.pending.has(tile.key)) return true;
         }
         return false;
     }

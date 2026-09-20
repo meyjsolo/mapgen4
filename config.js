@@ -43,7 +43,10 @@ export default {
         apronCells: 2,       /* halo cells around a tile used for seamless seams */
         maxVisibleTriangles: 300000, /* soft budget; coarsen tiles when exceeded */
         targetPixelsPerCell: 11,     /* screen px per cell at native LOD */
-        riverFlowExponent: 2,        /* lg_min_flow is adjusted by this per LOD */
+        riverFlowExponent: 2,        // lg_min_flow is adjusted by this per LOD
+        localRivers: false,          // tile-local river chain (downslope/moisture/flow accumulation
+                                      // + valley carving). false = no rivers and no river valleys;
+                                      // biome rainfall still comes from the world reference field
         maxInflight: 12,     /* max tiles in generation flight (across all workers) */
         paintDebounceMs: 30, /* delay before a regeneration round fires while painting */
         paintPreview: false, /* live colored brush overlay (optional; original feel = off) */
@@ -52,7 +55,25 @@ export default {
     },
     elevation: {
     },
+    city: {
+        /* Both default to false to strip the automatic city layer and
+         * leave only what the user paints:
+         *  - autoLayout: unpainted regions get an automatic zone layout
+         *    (water on water, commercial near the center, residential
+         *    around it, park on the outskirts)
+         *  - autoObjects: roads/buildings/trees are placed automatically
+         *    from zones (developable zones get roads + buildings, parks
+         *    and yards get trees). When false, only explicitly painted
+         *    zones and object brushes (force bits) appear. */
+        autoLayout: false,
+        autoObjects: false,
+    },
     biomes: {
+        /* When set (0..1), skip the wind/rain-shadow rainfall simulation on
+         * the reference field and use this constant moisture everywhere:
+         * biome colors collapse to a single hue (elevation white-blend only),
+         * green/yellow patches and rain shadow disappear. null = simulate. */
+        constantRainfall: 0.5,
     },
     rivers: {
     },
