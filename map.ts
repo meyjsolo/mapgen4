@@ -325,10 +325,11 @@ export default class Map {
      * Assign the painted terrain type (e.g. snow) and a blend weight.
      * Each region/triangle gets:
      *  - terrain: nearest integer label (0=auto, 1=snow, 2=grass, ...)
-     *  - terrainWeight: 0..1, distance to the nearest "different-or-auto"
-     *    cell, clamped. The weighted field lets the shader fade the
-     *    terrain color into the biome color over a controllable band so
-     *    there is no hard edge between new and old terrain.
+     *  - terrainWeight: 0..1, distance to the nearest auto (label 0)
+     *    cell, clamped. Only fades at painted→auto boundaries so painted
+     *    terrain blends into the natural biome there; painted↔painted
+     *    boundaries keep weight 1 and the vertex-shader terrain colors
+     *    interpolate directly across the edge (no biome band).
      *
      * The distance is computed on the 128x128 constraint canvas (cheap),
      * then weights are bilinear-sampled at each region/triangle centroid.
@@ -345,34 +346,25 @@ export default class Map {
             label[p] = Math.round(terrainGrid[p] / 4);
         }
 
-        // 2. distance to the nearest cell with a different label (or auto)
+        // 2. distance to the nearest auto (label 0) cell, via multi-source
+        // BFS seeded from every auto cell and propagating through every
+        // label. Painted cells far from any auto cell keep weight 1, so
+        // painted↔painted boundaries don't fade — the vertex shader
+        // interpolates the terrain colors directly across them.
         const dist = new Int16Array(sizeW * sizeH).fill(32767);
         const queue = new Int32Array(sizeW * sizeH);
         let qin = 0, qout = 0;
-        const isTopLabel = (p: number) => label[p] > 0;
-        for (let y = 0; y < sizeH; y++) {
-            for (let x = 0; x < sizeW; x++) {
-                const p = y * sizeW + x;
-                if (!isTopLabel(p)) continue;
-                // collect the 4-neighbour cell's labels
-                const own = label[p];
-                let different = false;
-                if (y > 0 && label[p - sizeW] !== own) different = true;
-                if (y < sizeH-1 && label[p + sizeW] !== own) different = true;
-                if (x > 0 && label[p - 1] !== own) different = true;
-                if (x < sizeW-1 && label[p + 1] !== own) different = true;
-                if (different) { dist[p] = 0; queue[qin++] = p; }
-            }
+        for (let p = 0; p < sizeW * sizeH; p++) {
+            if (label[p] === 0) { dist[p] = 0; queue[qin++] = p; }
         }
         while (qout < qin) {
             const p = queue[qout++];
             const x = p % sizeW, y = (p / sizeW) | 0;
-            const own = label[p];
             const nd = dist[p] + 1;
-            if (y > 0) { const q = p - sizeW; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
-            if (y < sizeH-1) { const q = p + sizeW; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
-            if (x > 0) { const q = p - 1; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
-            if (x < sizeW-1) { const q = p + 1; if (label[q] === own && dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (y > 0)         { const q = p - sizeW; if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (y < sizeH-1)   { const q = p + sizeW; if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (x > 0)         { const q = p - 1;     if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (x < sizeW-1)   { const q = p + 1;     if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
         }
 
         // 3. weight per canvas cell, bilinear-sampled at centroids

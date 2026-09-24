@@ -334,6 +334,9 @@ const vert_drape = `
     precision highp float;
     uniform mat4 u_projection;
     uniform vec2 u_world_size;
+    uniform sampler2D u_colormap;
+    uniform float u_biome_colors;
+    uniform vec3 u_terrainpalette[8];
     in vec2 a_xy;
     in vec2 a_em;
     in float a_country;
@@ -346,12 +349,49 @@ const vert_drape = `
     out float v_zone;
     flat out float v_terrain;
     out float v_terrainweight;
+    out vec3 v_terrain_color;
     void main() {
         v_em = a_em;
         v_country = a_country;
         v_zone = a_zone;
         v_terrain = a_terrain;
         v_terrainweight = a_terrainweight;
+
+        // Per-vertex terrain color, smooth-interpolated across triangles so
+        // painted<->painted boundaries blend the two terrain colors directly
+        // (no biome band). Auto vertices carry the biome color sampled here
+        // so painted->auto still blends toward the natural biome. The colormap
+        // is sampled via vertex texture fetch (u_colormap is already bound to
+        // TEXTURE0 for this program, shared by both shader stages).
+        const vec3 neutral_land_biome = vec3(0.9, 0.8, 0.7);
+        // z = elevation remapped to the colormap's 0..1 texture coordinate,
+        // matching frag_land (e = 0.5*(1+v_e)) that the drape pass reads
+        // back via u_elevation; using a_em.x raw would sample the wrong texel.
+        float z = 0.5 * (1.0 + a_em.x);
+        float m = a_em.y;
+        vec3 biome_at_vertex = mix(neutral_land_biome, texture(u_colormap, vec2(z, m)).rgb, u_biome_colors);
+        if (a_terrain > 0.5) {
+            int ti = int(clamp(floor(a_terrain + 0.5), 0.0, 5.0));
+            vec3 c;
+            if (ti == 4) {            // desert
+                c = mix(texture(u_colormap, vec2(z, 0.04)).rgb, vec3(0.82, 0.68, 0.26), 0.25);
+            } else if (ti == 5) {     // dirt
+                c = mix(texture(u_colormap, vec2(z, 0.04)).rgb, vec3(0.62, 0.48, 0.22), 0.30);
+            } else if (ti == 2) {     // grass
+                c = mix(texture(u_colormap, vec2(z, 0.55)).rgb, vec3(0.40, 0.58, 0.20), 0.25);
+            } else if (ti == 1) {     // snow (rim shadow grades toward biome at the auto edge)
+                vec3 snow_base = texture(u_colormap, vec2(0.82, m)).rgb;
+                vec3 shadow = vec3(0.55, 0.58, 0.65);
+                c = mix(snow_base, shadow, 1.0 - a_terrainweight);
+                c = mix(c, vec3(0.70, 0.74, 0.82), 0.25);
+            } else {                  // forest / default
+                c = u_terrainpalette[ti];
+            }
+            v_terrain_color = mix(neutral_land_biome, c, u_biome_colors);
+        } else {
+            v_terrain_color = biome_at_vertex;
+        }
+
         vec2 xy_clamped = clamp(a_xy, vec2(0.0, 0.0), u_world_size);
         v_z = max(0.0, a_em.x); // oceans with e<0 still rendered at z=0
         if (xy_clamped != a_xy) { // boundary points
@@ -361,6 +401,7 @@ const vert_drape = `
             v_zone = -1.0;
             v_terrain = -1.0;
             v_terrainweight = 0.0;
+            v_terrain_color = vec3(0.0);
         }
         vec4 pos = u_projection * vec4(xy_clamped, v_z, 1);
         v_xy = (1.0 + pos.xy) * 0.5;
@@ -392,6 +433,7 @@ const frag_drape = `
     in float v_zone;
     flat in float v_terrain;
     in float v_terrainweight;
+    in vec3 v_terrain_color;
     out vec4 out_fragcolor;
 
     const vec3 neutral_land_biome = vec3(0.9, 0.8, 0.7);
@@ -461,66 +503,15 @@ const frag_drape = `
             biome_color = u_citypalette[zi];
         }
 
-        // Explicit terrain (e.g. snow): blend the biome color into the terrain
-        // palette color. v_terrain is the integer label (0=auto,
-        // 1=snow, 2=grass, 3=forest, 4=desert); v_terrainweight is a
-        // distance-based blend so the edge fades instead of cutting.
-        //
-        // Desert (label 4) is special-cased: instead of a flat palette
-        // tint, sample the colormap once at forced-low rainfall while
-        // keeping the current elevation z. The painted desert then
-        // inherits the colormap's elevation-aware color — coast bands
-        // near sea level, snow whitening on high desert — rather than a
-        // single flat sandy RGB.
-        //
-        // The blend into biome_color is done in COLOR space (mix two
-        // colors by weight), NOT in rainfall space. Driving the rainfall
-        // coordinate toward desert interpolates m through the colormap's
-        // green mid-rainfall zone (~0.4), which lights up a green ring
-        // at the paint edge; combined with the orographic noise in
-        // v_em.y and the weight field aliasing at coarse LOD, that ring
-        // reads as green jagged burrs, very visible zoomed out. A
-        // straight color blend to the fixed desert sample sidesteps the
-        // green zone entirely.
-        if (v_terrain > 0.5 && v_terrainweight > 0.001) {
-            int ti = int(clamp(floor(v_terrain + 0.5), 0.0, 5.0));
-            if (ti == 4) {
-                vec3 desert_base = texture(u_colormap, vec2(z, 0.04)).rgb;
-                vec3 desert_color = mix(desert_base, vec3(0.82, 0.68, 0.26), 0.25);
-                desert_color = mix(neutral_biome_color, desert_color, u_biome_colors);
-                biome_color = desert_color;
-            } else if (ti == 5) {
-                vec3 base = texture(u_colormap, vec2(z, 0.04)).rgb;
-                vec3 dirt_color = mix(base, vec3(0.62, 0.48, 0.22), 0.30);
-                dirt_color = mix(neutral_biome_color, dirt_color, u_biome_colors);
-                biome_color = dirt_color;
-            } else if (ti == 2) {
-                vec3 grass_base = texture(u_colormap, vec2(z, 0.55)).rgb;
-                vec3 grass_color = mix(grass_base, vec3(0.40, 0.58, 0.20), 0.25);
-                grass_color = mix(neutral_biome_color, grass_color, u_biome_colors);
-                biome_color = grass_color;
-            } else if (ti == 1) {
-                // The snow label is gated at stamp time by minElevation
-                // (painting.ts: paintTerrainAt only stamps where the
-                // elevation constraint has risen past 0.3), so wherever
-                // this label is present a mountain is forming — no extra
-                // elevation gate needed here. Sample the colormap in
-                // its high-elevation whitening zone (forced z) keeping
-                // the natural rainfall, so the snow is a soft off-white
-                // with a faint tint instead of glaring pure white. Grade
-                // the rim toward a cool shadowed gray-blue so the snow
-                // edge melts into the surrounding biome, then
-                // darken/cool so it reads as snow, not glare.
-                vec3 snow_base = texture(u_colormap, vec2(0.82, v_em.y)).rgb;
-                vec3 shadow = vec3(0.55, 0.58, 0.65);
-                vec3 snow_color = mix(snow_base, shadow, 1.0 - v_terrainweight);
-                snow_color = mix(snow_color, vec3(0.70, 0.74, 0.82), 0.25);
-                snow_color = mix(neutral_biome_color, snow_color, u_biome_colors);
-                biome_color = mix(biome_color, snow_color, v_terrainweight);
-            } else {
-                vec3 terrain_color = u_terrainpalette[ti];
-                biome_color = mix(biome_color, terrain_color, v_terrainweight);
-            }
+        // Explicit terrain: v_terrain_color is computed per-vertex in
+        // vert_drape (terrain color for painted cells, biome color for
+        // auto cells) and smooth-interpolated across triangles.
+        // v_terrainweight fades only at painted->auto boundaries (see
+        // Map.assignTerrain), so painted<->painted edges blend the two
+        // terrain colors directly (no biome band) while painted->auto
+        // still crossfades into the per-fragment biome color here.
+        if (v_terrainweight > 0.001) {
+            biome_color = mix(biome_color, v_terrain_color, v_terrainweight);
         }
 
         // Tint land with the country color and draw dark national borders
