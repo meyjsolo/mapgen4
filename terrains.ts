@@ -13,8 +13,9 @@ export const TERRAIN_SNOW = 1;
 export const TERRAIN_GRASS = 2;
 export const TERRAIN_FOREST = 3;
 export const TERRAIN_DESERT = 4;
+export const TERRAIN_DIRT = 5;
 
-export const NUM_TERRAINS = 5;
+export const NUM_TERRAINS = 6;
 
 export const terrainPalette: Array<[number, number, number]> = [
     [0.0, 0.0, 0.0],        // placeholder, unused
@@ -22,4 +23,5 @@ export const terrainPalette: Array<[number, number, number]> = [
     [0.42, 0.62, 0.28],     // grass: fresh green
     [0.20, 0.40, 0.18],     // forest: deep green
     [0.78, 0.66, 0.40],     // desert: sandy yellow
+    [0.62, 0.48, 0.22],     // dirt: dark earthy yellow (土黄)
 ];

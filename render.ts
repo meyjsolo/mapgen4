@@ -483,36 +483,22 @@ const frag_drape = `
         // straight color blend to the fixed desert sample sidesteps the
         // green zone entirely.
         if (v_terrain > 0.5 && v_terrainweight > 0.001) {
-            int ti = int(clamp(floor(v_terrain + 0.5), 0.0, 4.0));
+            int ti = int(clamp(floor(v_terrain + 0.5), 0.0, 5.0));
             if (ti == 4) {
                 vec3 desert_base = texture(u_colormap, vec2(z, 0.04)).rgb;
-                // Grade the rim toward an earthy yellow-brown (土黄) as
-                // the paint weight falls: the desert interior stays light
-                // sandy while the edge darkens and warms into a soil tone
-                // before handing off to the surrounding biome, so the
-                // transition reads as a natural gradient instead of a
-                // flat tint abutting green.
-                vec3 earthy = vec3(0.64, 0.53, 0.20);
-                vec3 desert_color = mix(desert_base, earthy, 1.0 - v_terrainweight);
-                // Warm the whole desert toward a saturated yellow for a
-                // richer sand tone (center and rim alike).
-                desert_color = mix(desert_color, vec3(0.82, 0.68, 0.26), 0.25);
+                vec3 desert_color = mix(desert_base, vec3(0.82, 0.68, 0.26), 0.25);
                 desert_color = mix(neutral_biome_color, desert_color, u_biome_colors);
-                biome_color = mix(biome_color, desert_color, v_terrainweight);
+                biome_color = desert_color;
+            } else if (ti == 5) {
+                vec3 base = texture(u_colormap, vec2(z, 0.04)).rgb;
+                vec3 dirt_color = mix(base, vec3(0.62, 0.48, 0.22), 0.30);
+                dirt_color = mix(neutral_biome_color, dirt_color, u_biome_colors);
+                biome_color = dirt_color;
             } else if (ti == 2) {
                 vec3 grass_base = texture(u_colormap, vec2(z, 0.55)).rgb;
-                // Same pattern as the desert branch: the interior stays
-                // light (fresh grass) while the rim deepens toward a
-                // drier olive-green before handing off to the
-                // surrounding biome, so the transition reads as a soil
-                // gradient instead of a flat tint.
-                vec3 earthy = vec3(0.28, 0.34, 0.14);
-                vec3 grass_color = mix(grass_base, earthy, 1.0 - v_terrainweight);
-                // Freshen the whole grassland toward a saturated green
-                // (the colormap's land greens run yellowish).
-                grass_color = mix(grass_color, vec3(0.40, 0.58, 0.20), 0.25);
+                vec3 grass_color = mix(grass_base, vec3(0.40, 0.58, 0.20), 0.25);
                 grass_color = mix(neutral_biome_color, grass_color, u_biome_colors);
-                biome_color = mix(biome_color, grass_color, v_terrainweight);
+                biome_color = grass_color;
             } else if (ti == 1) {
                 // The snow label is gated at stamp time by minElevation
                 // (painting.ts: paintTerrainAt only stamps where the

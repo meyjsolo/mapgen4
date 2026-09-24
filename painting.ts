@@ -19,7 +19,7 @@ import {
     CITY_NONE, CITY_WATER, CITY_PARK, CITY_RESIDENTIAL, CITY_COMMERCIAL, cityPalette,
     OBJ_NONE, OBJ_ROAD, OBJ_BUILDING, OBJ_TREE,
 } from "./city.ts";
-import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, TERRAIN_FOREST, TERRAIN_DESERT, NUM_TERRAINS, terrainPalette} from "./terrains.ts";
+import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, TERRAIN_FOREST, TERRAIN_DESERT, TERRAIN_DIRT, NUM_TERRAINS, terrainPalette} from "./terrains.ts";
 import param from "./config.js";
 
 /* Painting canvas resolution. The width scales with the world so brushes
@@ -305,8 +305,8 @@ class Generator {
     paintTerrainAt(terrainType: number, x0: number, y0: number, outerRadius: number, minElevation?: number) {
         let {terrain, elevation} = this;
         // terrain values are stored spaced apart (0=auto, 4=snow, 8=grass,
-        // 12=forest, 16=desert) so bilinear sampling between two labels
-        // never lands on a third label.
+        // 12=forest, 16=desert, 20=dirt) so bilinear sampling between two
+        // labels never lands on a third label.
         const encoded = 4 * terrainType;
         const gate = minElevation ?? -Infinity;
         let xc = (x0 * CANVAS_WIDTH) | 0, yc = (y0 * CANVAS_HEIGHT) | 0;
@@ -537,6 +537,7 @@ const TERRAIN_TOOLS = [
     {key: 'grass',  label: 'grass',  type: TERRAIN_GRASS,  elevation: +0.05},
     {key: 'forest', label: 'forest', type: TERRAIN_FOREST, elevation: +0.1},
     {key: 'desert', label: 'desert', type: TERRAIN_DESERT, elevation: +0.05},
+    {key: 'dirt',   label: 'dirt',   type: TERRAIN_DIRT,   elevation: +0.05},
 ];
 const TERRAIN_TOOL_KEYS = TERRAIN_TOOLS.map(t => t.key);
 /* The four terrain buttons are plain buttons in embed.html (like the
