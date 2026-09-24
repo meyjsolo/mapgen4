@@ -161,7 +161,7 @@ function setBorderGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array): num
  * a_em is the map geometry array (see setMapGeometry) with city zone
  * ids stored as the fourth float per region vertex.
  */
-function setRoadGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array): number {
+function setRoadGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array, auto: boolean = true): number {
     const {numSolidSides} = mesh;
     const HALF_WIDTH = 3.0; // model units; ~0.3% of the map
     const CENTER_HALF_WIDTH = 4.5; // downtown main roads
@@ -177,9 +177,13 @@ function setRoadGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array): numbe
         // erase forbids the road, painted road forces it, otherwise
         // fall back to the automatic developable-zone placement
         if (objForbidden(o1, OBJ_ROAD) || objForbidden(o2, OBJ_ROAD)) continue;
-        const dev1 = z1 === CITY_RESIDENTIAL || z1 === CITY_COMMERCIAL;
-        const dev2 = z2 === CITY_RESIDENTIAL || z2 === CITY_COMMERCIAL;
-        if (!dev1 && !dev2 && !objForced(o1, OBJ_ROAD) && !objForced(o2, OBJ_ROAD)) continue;
+        const painted = objForced(o1, OBJ_ROAD) || objForced(o2, OBJ_ROAD);
+        if (!painted) {
+            if (!auto) continue;
+            const dev1 = z1 === CITY_RESIDENTIAL || z1 === CITY_COMMERCIAL;
+            const dev2 = z2 === CITY_RESIDENTIAL || z2 === CITY_COMMERCIAL;
+            if (!dev1 && !dev2) continue;
+        }
         const HALF = (z1 === CITY_COMMERCIAL || z2 === CITY_COMMERCIAL) ? CENTER_HALF_WIDTH : HALF_WIDTH;
 
         let t1 = mesh.t_inner_s(s),
@@ -219,7 +223,7 @@ function hash01(x: number, y: number): number {
  * a_em is the map geometry array (see setMapGeometry): elevation as
  * the first float and city zone as the fourth float per region vertex.
  */
-function setBuildingGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array): number {
+function setBuildingGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array, auto: boolean = true): number {
     const {numSolidRegions, numSolidTriangles} = mesh;
     const LIGHT = [0.35, 0.3, 1.0]; // fixed light from above-front
     const lightLen = Math.hypot(LIGHT[0], LIGHT[1], LIGHT[2]);
@@ -231,7 +235,8 @@ function setBuildingGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array): n
         if (objForbidden(o, OBJ_BUILDING)) continue; // erased: no building
         const forced = objForced(o, OBJ_BUILDING);
         // buildings belong in developable zones, unless explicitly painted
-        if (!forced && zone !== CITY_RESIDENTIAL && zone !== CITY_COMMERCIAL) continue;
+        // (or the automatic placement is off entirely)
+        if (!forced && (!auto || (zone !== CITY_RESIDENTIAL && zone !== CITY_COMMERCIAL))) continue;
         const e = a_em[7*r + 0];
         if (e < 0.0) continue; // no buildings on water
         const x = mesh.x_of_r(r), y = mesh.y_of_r(r);
@@ -288,7 +293,7 @@ function setBuildingGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array): n
  * Returns the number of trees; each uses 18 vertices of 6 floats each
  * (x, y, z, r, g, b). density scales how many regions get a tree.
  */
-function setTreeGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array, density: number): number {
+function setTreeGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array, density: number, auto: boolean = true): number {
     const {numSolidRegions, numSolidTriangles} = mesh;
     const LIGHT = [0.35, 0.3, 1.0];
     const lightLen = Math.hypot(LIGHT[0], LIGHT[1], LIGHT[2]);
@@ -302,7 +307,9 @@ function setTreeGeometry(mesh: Mesh, a_em: Float32Array, P: Float32Array, densit
         if (objForbidden(o, OBJ_TREE)) continue; // erased: no tree
         const forced = objForced(o, OBJ_TREE);
         // trees belong in parks and yards, unless explicitly painted
+        // (or the automatic placement is off entirely)
         if (!forced) {
+            if (!auto) continue;
             const isPark = zone === CITY_PARK;
             const isRes = zone === CITY_RESIDENTIAL;
             if (!isPark && !isRes) continue;

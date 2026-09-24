@@ -96,8 +96,12 @@ const initialParams = {
  */
 function main() {
     const world = new WorldManager(getParam());
-    const render = new Renderer(world);
-    render.bench = new Bench(baseParam.benchmark.enabled);
+    const render = new Renderer(world, {canvasSize: baseParam.world.canvasSize});
+    /* benchmark HUD + continuous rendering are opt-in (?bench=1); leaving
+     * them off keeps the renderer demand-driven (no per-frame work when
+     * nothing changed), which matters a lot on mobile */
+    const benchParam = new URLSearchParams(window.location.search).get('bench');
+    render.bench = new Bench(baseParam.benchmark.enabled || benchParam === '1');
     const cityManager = new CityManager();
     const cityUI = new CityUI(render, cityManager);
     render.cityUI = cityUI;
@@ -229,6 +233,10 @@ function main() {
     const numWorkers = Math.max(1, getParam().world.maxWorkers ?? 4);
     const workers = Array.from({length: numWorkers}, () => new window.Worker("build/_worker.js"));
     let workerRR = 0;
+    /* home worker per tile key — assigned on first request (round-robin),
+     * then reused for every regeneration so the worker already holds the
+     * cached mesh/Map/reference field and the regen takes the fast path */
+    const tileWorker = new Map<string, number>();
     let initialized = false;
     let initializedCount = 0;
 
@@ -249,23 +257,31 @@ function main() {
             if (d.type === 'tileReady') {
                 const tile = world.tiles.get(d.key);
                 if (!tile) return; /* tile was evicted while generating */
-                world.markTileReady(d.key, d);
-                render.onTileReady(tile, d, {
+                /* Apply the data before markTileReady: a regeneration it
+                 * triggers (state 'regen') must see the mesh we already
+                 * hold so the re-request skips resending it. */
+                if (!render.onTileReady(tile, d, {
                     borders: Painting.countryHasPainted(),
                     roads: d.scene === 'city',
                     buildings: d.scene === 'city',
                     trees: d.scene === 'city',
                     canopies: d.scene === 'wild',
-                });
+                    autoObjects: getParam().city?.autoObjects ?? true,
+                })) {
+                    /* we no longer hold the geometry for this tile (evicted)
+                     * but the worker wasn't asked for the mesh — mark for
+                     * regeneration so the next update re-requests it */
+                    tile.state = 'regen';
+                }
+                world.markTileReady(d.key, d);
                 if (render.bench) render.bench.reportGen(d.elapsed);
                 redraw();
             }
         });
     }
 
-    /* Request generation of a tile; distribute across workers round-robin. */
-    world.onRequestTile = (tile: Tile) => {
-        if (!initialized) return;
+    /* Build the genTile message for a tile. */
+    function genTileMessage(tile: Tile) {
         const p = getParam();
         Painting.setElevationParam(p.elevation);
         /* In the default flat-rectangle mode, force a flat valley floor
@@ -276,7 +292,7 @@ function main() {
                elevation: {...p.elevation, noisy_coastlines: 0, hill_height: 0},
                rivers: {...p.rivers, flow: 0}}
             : p;
-        workers[workerRR++ % workers.length].postMessage({
+        return {
             type: 'genTile',
             key: tile.key,
             scene: activeScene,
@@ -287,6 +303,10 @@ function main() {
             rect: tile.rect,
             refVersion: envVersion[activeScene],
             param: workerParam,
+            /* the mesh never changes per tile key: ask the worker to ship it
+             * only when we don't already hold the geometry (first request or
+             * after an LRU eviction); regenerations send just the map arrays */
+            needsMesh: !render.tileGeo.has(tile.key),
             constraints: {
                 sizeW: Painting.size.w,
                 sizeH: Painting.size.h,
@@ -296,7 +316,22 @@ function main() {
                 objects: Painting.objects,
                 terrain: Painting.terrain,
             },
-        });
+        };
+    }
+
+    /* Request generation of a tile. The first time a tile key is seen it
+     * goes round-robin to pick a home worker; every subsequent request
+     * (regeneration after painting, re-request after eviction) goes back
+     * to that same worker, which already holds the cached mesh, Map and
+     * reference field — so regenerations always take the fast path. */
+    world.onRequestTile = (tile: Tile) => {
+        if (!initialized) return;
+        let w = tileWorker.get(tile.key);
+        if (w === undefined) {
+            w = workerRR++ % workers.length;
+            tileWorker.set(tile.key, w);
+        }
+        workers[w].postMessage(genTileMessage(tile));
     };
 
     /* Drop the tile's GPU buffers + geometry when evicted from the cache. */
@@ -334,21 +369,38 @@ function main() {
      * (config lod.paintPreview). */
     Painting.previewEnabled = baseParam.lod.paintPreview ?? false;
     let paintTimer: number | null = null;
+    let paintDirty = false; /* the canvas holds paint no round has picked up yet */
     Painting.onUpdate = () => {
         if (Painting.previewEnabled) redraw(); // instant overlay feedback
+        paintDirty = true;
         if (paintTimer === null && !world.hasPendingWork()) {
             paintTimer = window.setTimeout(() => {
                 paintTimer = null;
+                paintDirty = false;
                 generate();
             }, getParam().lod.paintDebounceMs ?? 30);
         }
     };
-    /* Stroke finished: refresh the workers' reference field (held back
-     * during the stroke for brush responsiveness) and regenerate. */
+    /* Stroke finished. Two savings:
+     * 1. Only bump envVersion when the reference field can affect the
+     *    output — with constant rainfall and the local river chain off,
+     *    the reference (rainfall lookup + river seeding) is invariant
+     *    under painting, so the catch-up round can reuse the cached
+     *    field instead of every worker rebuilding the whole-world map.
+     * 2. Skip the catch-up regen entirely when the last round already
+     *    reflects the canvas, so lifting the pen doesn't leave a round
+     *    in flight that would block the next stroke's first feedback. */
     Painting.onStrokeEnd = () => {
-        envVersion[activeScene]++;
-        generate();
+        const p = getParam();
+        if (p.lod?.localRivers !== false || p.biomes?.constantRainfall == null) {
+            envVersion[activeScene]++;
+        }
+        const pending = paintTimer !== null || paintDirty;
+        if (paintTimer !== null) { clearTimeout(paintTimer); paintTimer = null; }
+        paintDirty = false;
+        if (pending) generate();
     };
+
     render.setCountryNames(Painting.countryNames);
 
     /* Kick off the workers with the world/lod configuration. */

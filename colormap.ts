@@ -36,7 +36,10 @@ function colormap() {
                 g = 64 + 64*e;
                 b = 127 + 127*e;
             } else { // adapted from terrain-from-noise article
-                m = m * (1-e); // higher elevation holds less moisture; TODO: should be based on slope, not elevation
+                // NOTE: moisture is no longer discounted by elevation (was
+                // `m = m * (1-e)`, "higher elevation holds less moisture") —
+                // biome color now follows rainfall alone at every elevation,
+                // so painted mountains no longer grow an earthy-tan band.
 
                 r = 210 - 100*m;
                 g = 185 - 45*m;

@@ -19,7 +19,7 @@ import {
     CITY_NONE, CITY_WATER, CITY_PARK, CITY_RESIDENTIAL, CITY_COMMERCIAL, cityPalette,
     OBJ_NONE, OBJ_ROAD, OBJ_BUILDING, OBJ_TREE,
 } from "./city.ts";
-import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, TERRAIN_FOREST, TERRAIN_DESERT, NUM_TERRAINS, terrainPalette} from "./terrains.ts";
+import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, TERRAIN_FOREST, TERRAIN_DESERT, TERRAIN_DIRT, NUM_TERRAINS, terrainPalette} from "./terrains.ts";
 import param from "./config.js";
 
 /* Painting canvas resolution. The width scales with the world so brushes
@@ -295,13 +295,20 @@ class Generator {
     /**
      * Stamp an explicit terrain type (e.g. snow) onto a disc. Painted
      * terrain overrides the automatic biome coloring for those regions.
+     * When minElevation is given, the label is only stamped where the
+     * elevation constraint has already risen past it — used by the snow
+     * brush so the white label doesn't race ahead of the mountain relief
+     * (paintAt accumulates elevation slowly, especially on fast
+     * strokes; without the gate a quick swipe stamps full snow on flat
+     * land and renders white before any mountain has formed).
      */
-    paintTerrainAt(terrainType: number, x0: number, y0: number, outerRadius: number) {
-        let {terrain} = this;
+    paintTerrainAt(terrainType: number, x0: number, y0: number, outerRadius: number, minElevation?: number) {
+        let {terrain, elevation} = this;
         // terrain values are stored spaced apart (0=auto, 4=snow, 8=grass,
-        // 12=forest, 16=desert) so bilinear sampling between two labels
-        // never lands on a third label.
+        // 12=forest, 16=desert, 20=dirt) so bilinear sampling between two
+        // labels never lands on a third label.
         const encoded = 4 * terrainType;
+        const gate = minElevation ?? -Infinity;
         let xc = (x0 * CANVAS_WIDTH) | 0, yc = (y0 * CANVAS_HEIGHT) | 0;
         let top = Math.ceil(Math.max(0, yc - outerRadius)),
             bottom = Math.floor(Math.min(CANVAS_HEIGHT-1, yc + outerRadius));
@@ -310,7 +317,10 @@ class Generator {
             let left = Math.max(0, xc - s),
                 right = Math.min(CANVAS_WIDTH-1, xc + s);
             for (let x = left; x <= right; x++) {
-                terrain[y * CANVAS_WIDTH + x] = encoded;
+                const p = y * CANVAS_WIDTH + x;
+                if (elevation[p] >= gate) {
+                    terrain[p] = encoded;
+                }
             }
         }
 
@@ -523,10 +533,11 @@ for (let t of CITY_OBJECT_TOOLS) {
  * mountain relief; grass keeps the land low and flat (like the valley
  * brush). */
 const TERRAIN_TOOLS = [
-    {key: 'snow',   label: 'snow',   type: TERRAIN_SNOW,   elevation: +1.0},
+    {key: 'snow',   label: 'snow',   type: TERRAIN_SNOW,   elevation: +1.0, minElevation: 0.3},
     {key: 'grass',  label: 'grass',  type: TERRAIN_GRASS,  elevation: +0.05},
     {key: 'forest', label: 'forest', type: TERRAIN_FOREST, elevation: +0.1},
     {key: 'desert', label: 'desert', type: TERRAIN_DESERT, elevation: +0.05},
+    {key: 'dirt',   label: 'dirt',   type: TERRAIN_DIRT,   elevation: +0.05},
 ];
 const TERRAIN_TOOL_KEYS = TERRAIN_TOOLS.map(t => t.key);
 /* The four terrain buttons are plain buttons in embed.html (like the
@@ -709,7 +720,15 @@ function setUpPaintEventHandling() {
                 g().paintAt({elevation: terrainTool.elevation}, coords[0], coords[1],
                             brushSize, nowMs - timestamp);
             }
-            g().paintTerrainAt(terrainTool.type, coords[0], coords[1], brushSize.outerRadius);
+            // Stamp the terrain label per-move so it shows in real time
+            // (the next regen round renders it, same lag as the
+            // elevation). For snow, the minElevation gate (set on the
+            // tool) restricts the stamp to cells whose elevation
+            // constraint has already risen past it, so a fast swipe
+            // (low elevation) can't stamp the white label ahead of the
+            // mountain relief — only dwelled, mountain-forming cells
+            // get snow, in lockstep with the forming relief.
+            g().paintTerrainAt(terrainTool.type, coords[0], coords[1], brushSize.outerRadius, terrainTool.minElevation);
         } else if (activeScene === 'city') {
             // City brushes: zone stamps, or paint/erase objects.
             if (currentTool === 'road') {

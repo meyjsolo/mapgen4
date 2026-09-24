@@ -334,6 +334,9 @@ const vert_drape = `
     precision highp float;
     uniform mat4 u_projection;
     uniform vec2 u_world_size;
+    uniform sampler2D u_colormap;
+    uniform float u_biome_colors;
+    uniform vec3 u_terrainpalette[8];
     in vec2 a_xy;
     in vec2 a_em;
     in float a_country;
@@ -344,14 +347,51 @@ const vert_drape = `
     out float v_z;
     flat out float v_country;
     out float v_zone;
-    out float v_terrain;
+    flat out float v_terrain;
     out float v_terrainweight;
+    out vec3 v_terrain_color;
     void main() {
         v_em = a_em;
         v_country = a_country;
         v_zone = a_zone;
         v_terrain = a_terrain;
         v_terrainweight = a_terrainweight;
+
+        // Per-vertex terrain color, smooth-interpolated across triangles so
+        // painted<->painted boundaries blend the two terrain colors directly
+        // (no biome band). Auto vertices carry the biome color sampled here
+        // so painted->auto still blends toward the natural biome. The colormap
+        // is sampled via vertex texture fetch (u_colormap is already bound to
+        // TEXTURE0 for this program, shared by both shader stages).
+        const vec3 neutral_land_biome = vec3(0.9, 0.8, 0.7);
+        // z = elevation remapped to the colormap's 0..1 texture coordinate,
+        // matching frag_land (e = 0.5*(1+v_e)) that the drape pass reads
+        // back via u_elevation; using a_em.x raw would sample the wrong texel.
+        float z = 0.5 * (1.0 + a_em.x);
+        float m = a_em.y;
+        vec3 biome_at_vertex = mix(neutral_land_biome, texture(u_colormap, vec2(z, m)).rgb, u_biome_colors);
+        if (a_terrain > 0.5) {
+            int ti = int(clamp(floor(a_terrain + 0.5), 0.0, 5.0));
+            vec3 c;
+            if (ti == 4) {            // desert
+                c = mix(texture(u_colormap, vec2(z, 0.04)).rgb, vec3(0.82, 0.68, 0.26), 0.25);
+            } else if (ti == 5) {     // dirt
+                c = mix(texture(u_colormap, vec2(z, 0.04)).rgb, vec3(0.62, 0.48, 0.22), 0.30);
+            } else if (ti == 2) {     // grass
+                c = mix(texture(u_colormap, vec2(z, 0.55)).rgb, vec3(0.40, 0.58, 0.20), 0.25);
+            } else if (ti == 1) {     // snow (rim shadow grades toward biome at the auto edge)
+                vec3 snow_base = texture(u_colormap, vec2(0.82, m)).rgb;
+                vec3 shadow = vec3(0.55, 0.58, 0.65);
+                c = mix(snow_base, shadow, 1.0 - a_terrainweight);
+                c = mix(c, vec3(0.70, 0.74, 0.82), 0.25);
+            } else {                  // forest / default
+                c = u_terrainpalette[ti];
+            }
+            v_terrain_color = mix(neutral_land_biome, c, u_biome_colors);
+        } else {
+            v_terrain_color = biome_at_vertex;
+        }
+
         vec2 xy_clamped = clamp(a_xy, vec2(0.0, 0.0), u_world_size);
         v_z = max(0.0, a_em.x); // oceans with e<0 still rendered at z=0
         if (xy_clamped != a_xy) { // boundary points
@@ -361,6 +401,7 @@ const vert_drape = `
             v_zone = -1.0;
             v_terrain = -1.0;
             v_terrainweight = 0.0;
+            v_terrain_color = vec3(0.0);
         }
         vec4 pos = u_projection * vec4(xy_clamped, v_z, 1);
         v_xy = (1.0 + pos.xy) * 0.5;
@@ -390,8 +431,9 @@ const frag_drape = `
     in float v_z;
     flat in float v_country;
     in float v_zone;
-    in float v_terrain;
+    flat in float v_terrain;
     in float v_terrainweight;
+    in vec3 v_terrain_color;
     out vec4 out_fragcolor;
 
     const vec3 neutral_land_biome = vec3(0.9, 0.8, 0.7);
@@ -461,14 +503,15 @@ const frag_drape = `
             biome_color = u_citypalette[zi];
         }
 
-        // Explicit terrain (e.g. snow): blend the biome color into the terrain
-        // palette color. v_terrain is the integer label (0=auto,
-        // 1=snow, 2=grass, 3=forest, 4=desert); v_terrainweight is a
-        // distance-based blend so the edge fades instead of cutting.
-        if (v_terrain > 0.5 && v_terrainweight > 0.001) {
-            int ti = int(clamp(floor(v_terrain + 0.5), 0.0, 4.0));
-            vec3 terrain_color = u_terrainpalette[ti];
-            biome_color = mix(biome_color, terrain_color, v_terrainweight);
+        // Explicit terrain: v_terrain_color is computed per-vertex in
+        // vert_drape (terrain color for painted cells, biome color for
+        // auto cells) and smooth-interpolated across triangles.
+        // v_terrainweight fades only at painted->auto boundaries (see
+        // Map.assignTerrain), so painted<->painted edges blend the two
+        // terrain colors directly (no biome band) while painted->auto
+        // still crossfades into the per-fragment biome color here.
+        if (v_terrainweight > 0.001) {
+            biome_color = mix(biome_color, v_terrain_color, v_terrainweight);
         }
 
         // Tint land with the country color and draw dark national borders
@@ -598,9 +641,37 @@ const frag_preview = `
 // Per-tile geometry + GPU buffers
 
 /* Render resolution. Matches the world aspect (2:1) so the map fills the
- * viewport naturally — no letterboxing, no distortion. */
-const fbo_texture_width: number = 2048;
-const fbo_texture_height: number = 1024;
+ * viewport naturally — no letterboxing, no distortion.
+ *
+ * Sized once at startup to the #map display rect (CSS size × DPR, DPR
+ * capped at 2) so mobile GPUs aren't pushing 4-8x more pixels than the
+ * screen can show; capped at 2048 so desktop never exceeds the historical
+ * size. Pin it for all devices by setting world.canvasSize in config.js. */
+let fbo_texture_width: number = 2048;
+let fbo_texture_height: number = 1024;
+
+function sizeFboTextures(pinnedWidth?: number) {
+    let width = 0;
+    if (pinnedWidth && pinnedWidth > 0) {
+        width = pinnedWidth;
+    } else {
+        const canvas = document.getElementById('mapgen4') as HTMLCanvasElement | null;
+        const w = canvas?.clientWidth ?? 0, h = canvas?.clientHeight ?? 0;
+        if (w > 0 && h > 0) {
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            /* #map keeps a 2:1 aspect ratio; take the larger of the two
+             * axes scaled to 2:1 so neither direction is undersampled if
+             * the CSS layout ever changes */
+            width = Math.ceil(Math.max(w, 2 * h) * dpr);
+        }
+    }
+    if (width > 0) {
+        width = Math.max(512, Math.min(2048, width));
+        if (width % 2) width++; /* keep the 2:1 height an integer */
+        fbo_texture_width = width;
+        fbo_texture_height = width / 2;
+    }
+}
 
 /* Maximum terrain elevation used for scissor expansion. Terrain
  * elevation is clamped to [-1, +1] (map.ts) and the vertex shaders
@@ -652,6 +723,9 @@ type TileGpu = {
 export default class Renderer {
     numRiverTriangles: number = 0;
     treeDensity: number = 1;
+    /* false = no zone-driven automatic roads/buildings/trees; only
+     * painted object brushes appear (config.js city.autoObjects) */
+    autoObjects: boolean = true;
 
     world: WorldManager;
     projection: mat4;
@@ -703,10 +777,14 @@ export default class Renderer {
 
     tileGeo = new Map<string, TileGeo>();
 
-    constructor (world: WorldManager) {
+    constructor (world: WorldManager, opts?: {canvasSize?: number}) {
         const canvas = document.getElementById('mapgen4') as HTMLCanvasElement;
         this.world = world;
         this.webgl = new WebGLWrapper(canvas);
+
+        /* Size the render targets before anything allocates from or
+         * resizes to them (canvas backing store, FBOs, screenshot). */
+        sizeFboTextures(opts?.canvasSize);
 
         this.resizeCanvas();
 
@@ -828,16 +906,19 @@ export default class Renderer {
 
     /* ---- per-tile geometry handling ---- */
 
+    /* Returns false when the data couldn't be applied (no cached geometry
+     * and no mesh shipped) — the caller re-requests the tile. */
     onTileReady(tile: Tile, data: {
-        mesh: SerializedMesh;
+        mesh?: SerializedMesh;
         a_quad_em: Float32Array;
         quad_elements: Int32Array;
         a_river_xyww: Float32Array;
         numRiverTriangles: number;
-    }, overlays: {borders: boolean; roads: boolean; buildings: boolean; trees: boolean; canopies: boolean}) {
-        const mesh = deserializeMesh(data.mesh);
+    }, overlays: {borders: boolean; roads: boolean; buildings: boolean; trees: boolean; canopies: boolean; autoObjects?: boolean}): boolean {
         let geo = this.tileGeo.get(tile.key);
         if (!geo) {
+            if (!data.mesh) return false;
+            const mesh = deserializeMesh(data.mesh);
             geo = {
                 mesh,
                 a_quad_xy: new Float32Array(2 * (mesh.numRegions + mesh.numTriangles)),
@@ -857,34 +938,39 @@ export default class Renderer {
             Geometry.setMeshGeometry(mesh, geo.a_quad_xy);
             this.tileGeo.set(tile.key, geo);
         } else {
-            geo.mesh = mesh;
+            /* the mesh for a tile key never changes across regenerations
+             * (the worker caches it), so keep the cached mesh and only
+             * swap in the per-regen arrays — this skips the ~1.4MB mesh
+             * clone + deserializeMesh (tens of ms on mobile) per tile */
             geo.a_quad_em = data.a_quad_em;
             geo.quad_elements = data.quad_elements;
-            geo.quad_elements_length = 3 * mesh.numSolidSides;
+            geo.quad_elements_length = 3 * geo.mesh.numSolidSides;
             geo.a_river_xyww = data.a_river_xyww;
             geo.numRiverTriangles = data.numRiverTriangles;
             geo.dirty = true;
         }
         this.computeTileOverlays(geo, overlays);
+        return true;
     }
 
-    computeTileOverlays(geo: TileGeo, overlays: {borders: boolean; roads: boolean; buildings: boolean; trees: boolean; canopies: boolean}) {
+    computeTileOverlays(geo: TileGeo, overlays: {borders: boolean; roads: boolean; buildings: boolean; trees: boolean; canopies: boolean; autoObjects?: boolean}) {
         const {mesh} = geo;
+        this.autoObjects = overlays.autoObjects ?? true;
         if (overlays.borders) {
             if (!geo.a_border_xy) geo.a_border_xy = new Float32Array(18 * mesh.numSolidSides);
             geo.numBorderSegments = Geometry.setBorderGeometry(mesh, geo.a_quad_em, geo.a_border_xy);
         }
         if (overlays.roads) {
             if (!geo.a_road_xy) geo.a_road_xy = new Float32Array(12 * mesh.numSolidSides);
-            geo.numRoadSegments = Geometry.setRoadGeometry(mesh, geo.a_quad_em, geo.a_road_xy);
+            geo.numRoadSegments = Geometry.setRoadGeometry(mesh, geo.a_quad_em, geo.a_road_xy, this.autoObjects);
         }
         if (overlays.buildings) {
             if (!geo.a_buildings) geo.a_buildings = new Float32Array(180 * mesh.numSolidRegions);
-            geo.numBuildings = Geometry.setBuildingGeometry(mesh, geo.a_quad_em, geo.a_buildings);
+            geo.numBuildings = Geometry.setBuildingGeometry(mesh, geo.a_quad_em, geo.a_buildings, this.autoObjects);
         }
         if (overlays.trees) {
             if (!geo.a_trees) geo.a_trees = new Float32Array(108 * mesh.numSolidRegions);
-            geo.numTrees = Geometry.setTreeGeometry(mesh, geo.a_quad_em, geo.a_trees, this.treeDensity);
+            geo.numTrees = Geometry.setTreeGeometry(mesh, geo.a_quad_em, geo.a_trees, this.treeDensity, this.autoObjects);
         }
         if (overlays.canopies) {
             if (!geo.a_forest_canopies) geo.a_forest_canopies = new Float32Array(108 * mesh.numSolidRegions);
@@ -897,7 +983,7 @@ export default class Renderer {
         const geo = this.tileGeo.get(tile.key);
         if (!geo) return;
         if (!geo.a_trees) geo.a_trees = new Float32Array(108 * geo.mesh.numSolidRegions);
-        geo.numTrees = Geometry.setTreeGeometry(geo.mesh, geo.a_quad_em, geo.a_trees, this.treeDensity);
+        geo.numTrees = Geometry.setTreeGeometry(geo.mesh, geo.a_quad_em, geo.a_trees, this.treeDensity, this.autoObjects);
         geo.dirty = true;
     }
 

@@ -21,6 +21,7 @@ const worker: Worker = self as any;
 // worker-side configuration and caches
 let worldWidth = 4000, worldHeight = 2000, baseSpacing = 5.5, mountainSpacing = 35, meshSeed = 12345;
 let spacingFactor = 2, riverFlowExponent = 2, referenceSpacing = 22;
+let localRivers = true;
 let mountainPeaks: Float32Array = new Float32Array(0);
 // meshKey ("lod|tx|ty") -> {mesh, t_peaks}
 const meshes = new globalThis.Map<string, {mesh: Mesh; t_peaks: number[]}>();
@@ -113,8 +114,15 @@ function buildReference(version: number, param: any, constraints: any): RefField
     const {mesh} = mm;
     const refMap = new MapGen(mesh, mm.t_peaks, {...param, spacing: referenceSpacing}, mountainPeaks);
     refMap.assignElevation(param.elevation, constraints);
-    refMap.assignRainfall(param.biomes);
-    refMap.assignRivers(param.rivers);
+    if (param.biomes?.constantRainfall == null) {
+        refMap.assignRainfall(param.biomes);
+    } else {
+        /* constant-rainfall mode: skip the wind/rain-shadow simulation and
+         * fill the world with one uniform moisture value (see config.js
+         * biomes.constantRainfall) */
+        refMap.rainfall_r.fill(param.biomes.constantRainfall);
+    }
+    if (localRivers) refMap.assignRivers(param.rivers);
 
     /* flow lookup: land triangles only (ocean flow is always 0) */
     const minFlow = Math.exp(param.rivers.lg_min_flow
@@ -122,14 +130,16 @@ function buildReference(version: number, param: any, constraints: any): RefField
     const triX = new Float32Array(mesh.numSolidTriangles), triY = new Float32Array(mesh.numSolidTriangles), triFlow = new Float32Array(mesh.numSolidTriangles);
     const chX = new Float32Array(mesh.numSolidTriangles), chY = new Float32Array(mesh.numSolidTriangles), chFlow = new Float32Array(mesh.numSolidTriangles);
     let nt = 0, nc = 0;
-    for (let t = 0; t < mesh.numSolidTriangles; t++) {
-        if (refMap.elevation_t[t] < 0.0) continue;
-        const x = mesh.x_of_t(t), y = mesh.y_of_t(t), flow = refMap.flow_t[t];
-        triX[nt] = x; triY[nt] = y; triFlow[nt] = flow;
-        nt++;
-        if (flow >= minFlow) {
-            chX[nc] = x; chY[nc] = y; chFlow[nc] = flow;
-            nc++;
+    if (localRivers) {
+        for (let t = 0; t < mesh.numSolidTriangles; t++) {
+            if (refMap.elevation_t[t] < 0.0) continue;
+            const x = mesh.x_of_t(t), y = mesh.y_of_t(t), flow = refMap.flow_t[t];
+            triX[nt] = x; triY[nt] = y; triFlow[nt] = flow;
+            nt++;
+            if (flow >= minFlow) {
+                chX[nc] = x; chY[nc] = y; chFlow[nc] = flow;
+                nc++;
+            }
         }
     }
     /* rainfall lookup: solid regions */
@@ -191,14 +201,22 @@ function applyRiverCarve(map: MapGen, ref: RefField) {
 }
 
 /* Fill the tile map's rainfall_r from the reference field (replaces the
- * tile-local assignRainfall) and build the apron external-flow seed. */
-function applyReference(map: MapGen, ref: RefField, spacing: number, rect: number[]): Float32Array {
+ * tile-local assignRainfall). Runs regardless of the local river chain —
+ * this is what keeps biome colors seamless across tiles and LODs. */
+function applyReferenceRainfall(map: MapGen, ref: RefField) {
     const {mesh} = map;
     for (let r = 0; r < mesh.numRegions; r++) {
         if (mesh.is_ghost_r(r)) { map.rainfall_r[r] = 0; continue; }
         const i = nearestIndex(ref.regLookup, ref.regX, ref.regY, mesh.x_of_r(r), mesh.y_of_r(r));
         map.rainfall_r[r] = i >= 0 ? ref.regRain[i] : 0;
     }
+}
+
+/* Build the apron external-flow seed: triangles outside the tile's
+ * interior rect start with the reference flow at their position so
+ * rivers entering a tile bring their upstream water across the seam. */
+function buildExternalFlow(map: MapGen, ref: RefField, spacing: number, rect: number[]): Float32Array {
+    const {mesh} = map;
     const flowScale = (ref.spacing / spacing) * (ref.spacing / spacing);
     const externalFlow_t = new Float32Array(mesh.numTriangles);
     const [x0, y0, w, h] = rect;
@@ -222,12 +240,39 @@ function handleInit(event) {
     spacingFactor = d.lod?.spacingFactor ?? spacingFactor;
     riverFlowExponent = d.lod?.riverFlowExponent ?? riverFlowExponent;
     referenceSpacing = d.lod?.referenceSpacing ?? baseSpacing * spacingFactor * spacingFactor;
+    localRivers = d.lod?.localRivers ?? true;
     mountainPeaks = generateMountainPeaks(meshSeed, mountainSpacing, worldWidth, worldHeight);
     worker.postMessage({type: 'initDone'});
 }
 
+/* The per-tile assign chain: country/elevation/city/object/terrain
+ * constraints, reference rainfall, and (when enabled) the local river
+ * chain. Returns the LOD-scaled rivers param for river geometry rendering. */
+function assignTile(map: MapGen, param: any, constraints: any, ref: RefField, spacing: number, rect: any, genRect: any) {
+    map.assignCountries(constraints.country, constraints.sizeW, constraints.sizeH);
+    map.assignElevation(param.elevation, constraints);
+    if (localRivers) applyRiverCarve(map, ref); // lock trunk rivers to the same course at every LOD
+    map.assignCity(constraints.city, constraints.sizeW, constraints.sizeH, param.city?.autoLayout ?? true);
+    map.assignObjects(constraints.objects, constraints.sizeW, constraints.sizeH);
+    map.assignTerrain(constraints.terrain, constraints.sizeW, constraints.sizeH);
+    // Rainfall comes from the world-level reference field (seamless);
+    // the tile-local assignRainfall is only used on the reference itself.
+    applyReferenceRainfall(map, ref);
+
+    // River threshold layering: flow accumulates as 1/spacing^2, so the
+    // minimum-flow cutoff is scaled per LOD so the same physical rivers
+    // stay visible across LODs while fine tributaries only appear zoomed in.
+    const riversParam = {...param.rivers,
+        lg_min_flow: param.rivers.lg_min_flow + riverFlowExponent * Math.log2(baseSpacing / spacing)};
+    if (localRivers) {
+        const externalFlow_t = buildExternalFlow(map, ref, spacing, rect ?? genRect);
+        map.assignRivers(riversParam, externalFlow_t);
+    }
+    return riversParam;
+}
+
 function handleGenTile(event) {
-    const {key, scene, lod, tx, ty, rect, genRect, refVersion, param, constraints} = event.data;
+    const {key, scene, lod, tx, ty, rect, genRect, refVersion, param, constraints, needsMesh} = event.data;
     const spacing = baseSpacing * Math.pow(spacingFactor, -lod);
 
     // Reference field: rebuild only when the main thread bumped the version.
@@ -261,35 +306,29 @@ function handleGenTile(event) {
 
     const start_time = performance.now();
 
-    map.assignCountries(constraints.country, constraints.sizeW, constraints.sizeH);
-    map.assignElevation(param.elevation, constraints);
-    applyRiverCarve(map, ref); // lock trunk rivers to the same course at every LOD
-    map.assignCity(constraints.city, constraints.sizeW, constraints.sizeH);
-    map.assignObjects(constraints.objects, constraints.sizeW, constraints.sizeH);
-    map.assignTerrain(constraints.terrain, constraints.sizeW, constraints.sizeH);
-    // Rainfall comes from the world-level reference field (seamless);
-    // the tile-local assignRainfall is only used on the reference itself.
-    const externalFlow_t = applyReference(map, ref, spacing, rect ?? genRect);
-
-    // River threshold layering: flow accumulates as 1/spacing^2, so the
-    // minimum-flow cutoff is scaled per LOD so the same physical rivers
-    // stay visible across LODs while fine tributaries only appear zoomed in.
-    const riversParam = {...param.rivers,
-        lg_min_flow: param.rivers.lg_min_flow + riverFlowExponent * Math.log2(baseSpacing / spacing)};
-    map.assignRivers(riversParam, externalFlow_t);
+    const riversParam = assignTile(map, param, constraints, ref, spacing, rect, genRect);
     Geometry.setMapGeometry(map, param.elevation.mountain_folds, quad_elements, a_quad_em);
-    const numRiverTriangles = Geometry.setRiverGeometry(map, spacing, riversParam, a_river_xyww);
+    const numRiverTriangles = localRivers
+        ? Geometry.setRiverGeometry(map, spacing, riversParam, a_river_xyww)
+        : 0;
 
     const elapsed = performance.now() - start_time;
 
-    const mesh = serializeMesh(mm.mesh);
+    // The mesh for a tile key never changes (cached above by meshKey), so it
+    // is serialized back only when the main thread doesn't have it yet;
+    // regenerations ship just the map arrays. This keeps painting strokes
+    // from paying a ~1.4MB clone + full mesh deserialization per tile per
+    // round on the main thread.
+    const mesh = needsMesh ? serializeMesh(mm.mesh) : undefined;
     const transferables = [
         quad_elements.buffer,
         a_quad_em.buffer,
         a_river_xyww.buffer,
-        // NOTE: mesh arrays are intentionally NOT transferred — they are
-        // cached on this side and reused for every regeneration.
+        // NOTE: mesh triangles/halfedges are intentionally NOT transferred —
+        // they are cached on this side and reused for every regeneration.
+        // (points IS fresh, so it can go zero-copy.)
     ];
+    if (mesh) transferables.push(mesh.points.buffer);
     worker.postMessage({
         type: 'tileReady',
         key, scene, lod, tx, ty,
