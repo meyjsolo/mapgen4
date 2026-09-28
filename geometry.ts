@@ -485,4 +485,27 @@ function setRiverGeometry(map: Map, spacing: number, riversParam: any, P: Float3
     return p / 15;
 };
 
-export default {setMeshGeometry, setMapGeometry, setRiverGeometry, setBorderGeometry, setRoadGeometry, setBuildingGeometry, setTreeGeometry, setForestCanopyGeometry};
+/**
+ * Pack the per-vertex terrain-blend attributes into a 2-float-per-vertex
+ * array: [otherTerrain, blendFactor] for each region vertex then each
+ * triangle vertex (same ordering as setMapGeometry). Uploaded as its own
+ * GPU buffer so the existing 7-float a_quad_em stride is untouched.
+ */
+function setTerrainBlendGeometry(map: Map, P: Float32Array) {
+    let {mesh, terrainOther_r, terrainOther_t, terrainBlend_r, terrainBlend_t} = map;
+    let {numRegions, numTriangles} = mesh;
+    if (P.length !== 2 * (numRegions + numTriangles)) { throw "wrong size"; }
+
+    let p = 0;
+    for (let r = 0; r < numRegions; r++) {
+        P[p++] = terrainOther_r[r];
+        P[p++] = terrainBlend_r[r];
+    }
+    for (let t = 0; t < numTriangles; t++) {
+        P[p++] = terrainOther_t[t];
+        P[p++] = terrainBlend_t[t];
+    }
+}
+
+
+export default {setMeshGeometry, setMapGeometry, setTerrainBlendGeometry, setRiverGeometry, setBorderGeometry, setRoadGeometry, setBuildingGeometry, setTreeGeometry, setForestCanopyGeometry};

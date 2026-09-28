@@ -68,6 +68,15 @@ export default {
         autoLayout: false,
         autoObjects: false,
     },
+    terrain: {
+        /* Terrain Boundary Color Blending: crossfade adjacent painted
+         * terrains (forest<->grass, etc.) over a world-space band instead
+         * of the default one-cell hard edge. blendWidth is in world units
+         * and extends blendWidth into each side (total 2*blendWidth).
+         * blendWidth = 0 (or blendEnabled = false) restores hard edges. */
+        blendEnabled: true,
+        blendWidth: 120,
+    },
     biomes: {
         /* When set (0..1), skip the wind/rain-shadow rainfall simulation on
          * the reference field and use this constant moisture everywhere:

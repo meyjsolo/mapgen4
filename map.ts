@@ -166,6 +166,10 @@ export default class Map {
     terrain_r: Float32Array;
     terrainWeight_t: Float32Array;
     terrainWeight_r: Float32Array;
+    terrainOther_t: Float32Array;
+    terrainOther_r: Float32Array;
+    terrainBlend_t: Float32Array;
+    terrainBlend_r: Float32Array;
 
     constructor (public mesh: Mesh, public t_peaks: number[], param: any, mountainPeaks?: Float32Array) {
         this.spacing = param.spacing;
@@ -196,6 +200,10 @@ export default class Map {
         this.terrain_r           = new Float32Array(mesh.numRegions);
         this.terrainWeight_t     = new Float32Array(mesh.numTriangles);
         this.terrainWeight_r     = new Float32Array(mesh.numRegions);
+        this.terrainOther_t      = new Float32Array(mesh.numTriangles);
+        this.terrainOther_r      = new Float32Array(mesh.numRegions);
+        this.terrainBlend_t      = new Float32Array(mesh.numTriangles);
+        this.terrainBlend_r      = new Float32Array(mesh.numRegions);
     }
 
     /**
@@ -400,6 +408,53 @@ export default class Map {
             let x = mesh.x_of_r(r) / this.worldWidth, y = mesh.y_of_r(r) / this.worldHeight;
             terrain_r[r] = sampleLabel(x, y);
             terrainWeight_r[r] = sampleWeight(x, y);
+        }
+    }
+
+    /**
+     * Sample the world-level terrain-blend field (computed once per
+     * generation round on the paint canvas by the worker, see
+     * buildTerrainField) at each region/triangle centroid.
+     *
+     * For each vertex we store:
+     *  - terrainOther: the nearest *different* painted terrain label
+     *    (0 when the vertex is auto or deep inside a single terrain)
+     *  - terrainBlend: 0..0.5 weight toward that other terrain, already
+     *    smoothstepped on the canvas. 0 far from any boundary, ~0.5 at a
+     *    boundary. The vertex shader crossfades the two terrain colors by
+     *    this factor, so the blend band is world-space wide (not one cell).
+     */
+    assignTerrainBlend(otherLabel: Int8Array, blendFactor: Float32Array, sizeW: number, sizeH: number) {
+        let {mesh, terrainOther_t, terrainOther_r, terrainBlend_t, terrainBlend_r} = this;
+        let {numSolidTriangles} = mesh;
+
+        function sampleOther(x: number, y: number): number {
+            x = clamp((x * sizeW) | 0, 0, sizeW - 1);
+            y = clamp((y * sizeH) | 0, 0, sizeH - 1);
+            return otherLabel[y * sizeW + x];
+        }
+        function sampleBlend(x: number, y: number): number {
+            x = clamp(x * (sizeW-1), 0, sizeW-2);
+            y = clamp(y * (sizeH-1), 0, sizeH-2);
+            let xi = Math.floor(x), yi = Math.floor(y),
+                xf = x - xi, yf = y - yi;
+            let p = sizeW * yi + xi;
+            let b00 = blendFactor[p], b01 = blendFactor[p + 1],
+                b10 = blendFactor[p + sizeW], b11 = blendFactor[p + sizeW + 1];
+            return ((b00 * (1 - xf) + b01 * xf) * (1 - yf)
+                 + (b10 * (1 - xf) + b11 * xf) * yf);
+        }
+
+        for (let t = 0; t < numSolidTriangles; t++) {
+            let x = mesh.x_of_t(t) / this.worldWidth, y = mesh.y_of_t(t) / this.worldHeight;
+            terrainOther_t[t] = sampleOther(x, y);
+            terrainBlend_t[t] = sampleBlend(x, y);
+        }
+        for (let r = 0; r < mesh.numRegions; r++) {
+            if (mesh.is_ghost_r(r)) { terrainOther_r[r] = 0; terrainBlend_r[r] = 0; continue; }
+            let x = mesh.x_of_r(r) / this.worldWidth, y = mesh.y_of_r(r) / this.worldHeight;
+            terrainOther_r[r] = sampleOther(x, y);
+            terrainBlend_r[r] = sampleBlend(x, y);
         }
     }
 
