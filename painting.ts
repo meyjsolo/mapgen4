@@ -70,19 +70,10 @@ class Generator {
                 let nx = 2 * x/CANVAS_SIZE - 1,
                     ny = 2 * y/CANVAS_SIZE - 1;
                 let distance = Math.max(Math.abs(nx), Math.abs(ny));
-                let e = 0.5 * (fbm_noise(nx, ny) + island * (0.75 - 2 * distance * distance));
-                if (e < -1.0) { e = -1.0; }
-                if (e > +1.0) { e = +1.0; }
-                elevation[p] = e;
-                if (e > 0.0) {
-                    let m = (0.5 * noise2D(nx + 30, ny + 50)
-                             + 0.5 * noise2D(2*nx + 33, 2*ny + 55));
-                    // TODO: make some of these into parameters
-                    let mountain = Math.min(1.0, e * 5.0) * (1 - Math.abs(m) / 0.5);
-                    if (mountain > 0.0) {
-                        elevation[p] = Math.max(e, Math.min(e * 3, mountain));
-                    }
-                }
+            let e = 0.5 * (fbm_noise(nx, ny) + island * (0.75 - 2 * distance * distance));
+            if (e < -1.0) { e = -1.0; }
+            if (e > +1.0) { e = +1.0; }
+            elevation[p] = e > 0.0 ? TOOLS.valley.elevation : e;
             }
         }
 
@@ -147,6 +138,7 @@ document.getElementById('button-reset').addEventListener('click', () => {
 
 const SIZES = {
     // rate is effect per second
+    mini:   {key: '0', rate: 10, innerRadius: 0.5, outerRadius: 0.75},
     tiny:   {key: '1', rate: 9, innerRadius: 1.5, outerRadius: 2.5},
     small:  {key: '2', rate: 8, innerRadius: 2, outerRadius: 6},
     medium: {key: '3', rate: 5, innerRadius: 5, outerRadius: 10},
@@ -173,6 +165,7 @@ function displayCurrentTool() {
 }
 
 const controls: [string, string, () => void][] = [
+    ['0', "mini",     () => { currentSize = 'mini'; }],
     ['1', "tiny",     () => { currentSize = 'tiny'; }],
     ['2', "small",    () => { currentSize = 'small'; }],
     ['3', "medium",   () => { currentSize = 'medium'; }],
