@@ -23,5 +23,5 @@ export const terrainPalette: Array<[number, number, number]> = [
     [0.42, 0.62, 0.28],     // grass: fresh green
     [0.20, 0.40, 0.18],     // forest: deep green
     [0.78, 0.66, 0.40],     // desert: sandy yellow
-    [0.62, 0.48, 0.22],     // dirt: dark earthy yellow (土黄)
+    [0.32, 0.24, 0.11],     // dirt: dark earthy brown (深褐土)
 ];

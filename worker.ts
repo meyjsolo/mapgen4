@@ -73,6 +73,92 @@ type RefField = {
 
 const references = new globalThis.Map<string, RefField>();
 
+
+//////////////////////////////////////////////////////////////////////
+// Terrain boundary blend field
+//
+// A world-level field on the paint canvas: for each canvas cell we find
+// the nearest *different* painted terrain label and its distance, then
+// turn the distance into a smoothstepped blend weight (0 far from any
+// boundary, ~0.5 at a boundary). Tiles bilinearly-sample this at their
+// vertex centroids (Map.assignTerrainBlend) so adjacent painted terrains
+// crossfade over a world-space band instead of a one-cell hard edge.
+//
+// Built once per generation round (cached by scene + terrainVersion +
+// blendWidth), so panning/zooming never rebuilds it and all tiles in a
+// round share the same field. Disabled (all-zero) when blendWidth <= 0.
+
+type TerrainField = {
+    version: number;
+    blendWidth: number;
+    sizeW: number;
+    sizeH: number;
+    otherLabel: Int8Array;   // nearest different painted label per cell (0 = none/auto)
+    blendFactor: Float32Array; // 0..0.5 weight toward that label, smoothstepped
+};
+
+const terrainFields = new globalThis.Map<string, TerrainField>();
+
+function buildTerrainField(version: number, terrainGrid: Float32Array, sizeW: number, sizeH: number, blendWidth: number, enabled: boolean): TerrainField {
+    const N = sizeW * sizeH;
+    const otherLabel = new Int8Array(N);
+    const blendFactor = new Float32Array(N);
+
+    if (!enabled || blendWidth <= 0) {
+        return {version, blendWidth, sizeW, sizeH, otherLabel, blendFactor};
+    }
+
+    // label per canvas cell, matching Map.assignTerrain (round(grid/4))
+    const label = new Int8Array(N);
+    for (let p = 0; p < N; p++) {
+        label[p] = Math.round(terrainGrid[p] / 4);
+    }
+
+    // world units per canvas cell (paint canvas matches the world aspect)
+    const cellW = worldWidth / sizeW;
+    const blendCells = blendWidth / cellW;
+
+    // For each painted label (1..5), multi-source BFS its distance to every
+    // cell; merge into each cell's nearest *foreign* label.
+    const dist = new Int16Array(N);
+    const queue = new Int32Array(N);
+    const bestDist = new Int16Array(N).fill(32767);
+    const bestOther = new Int8Array(N);
+
+    for (let L = 1; L <= 5; L++) {
+        dist.fill(32767);
+        let qin = 0, qout = 0;
+        for (let p = 0; p < N; p++) {
+            if (label[p] === L) { dist[p] = 0; queue[qin++] = p; }
+        }
+        while (qout < qin) {
+            const p = queue[qout++];
+            const x = p % sizeW, y = (p / sizeW) | 0;
+            const nd = dist[p] + 1;
+            if (y > 0)       { const q = p - sizeW; if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (y < sizeH-1) { const q = p + sizeW; if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (x > 0)       { const q = p - 1;     if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (x < sizeW-1) { const q = p + 1;     if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+        }
+        for (let p = 0; p < N; p++) {
+            if (label[p] === L || label[p] === 0) continue; // own or auto: no foreign blend
+            if (dist[p] < bestDist[p]) { bestDist[p] = dist[p]; bestOther[p] = L; }
+        }
+    }
+
+    // smoothstep the distance into a symmetric 0..0.5 blend weight: 0.5 at
+    // a boundary (dist 0), 0 once dist >= blendCells (blendWidth in world).
+    for (let p = 0; p < N; p++) {
+        if (label[p] === 0 || bestOther[p] === 0) { blendFactor[p] = 0; continue; }
+        let t = bestDist[p] / blendCells;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        t = t * t * (3 - 2 * t);
+        blendFactor[p] = 0.5 * (1 - t);
+    }
+
+    return {version, blendWidth, sizeW, sizeH, otherLabel: bestOther, blendFactor};
+}
+
 function buildPointLookup(cell: number, xs: Float32Array, ys: Float32Array): PointLookup {
     const width = Math.ceil(worldWidth / cell) + 2;
     const buckets = new globalThis.Map<number, number[]>();
@@ -248,13 +334,14 @@ function handleInit(event) {
 /* The per-tile assign chain: country/elevation/city/object/terrain
  * constraints, reference rainfall, and (when enabled) the local river
  * chain. Returns the LOD-scaled rivers param for river geometry rendering. */
-function assignTile(map: MapGen, param: any, constraints: any, ref: RefField, spacing: number, rect: any, genRect: any) {
+function assignTile(map: MapGen, param: any, constraints: any, ref: RefField, tf: TerrainField, spacing: number, rect: any, genRect: any) {
     map.assignCountries(constraints.country, constraints.sizeW, constraints.sizeH);
     map.assignElevation(param.elevation, constraints);
     if (localRivers) applyRiverCarve(map, ref); // lock trunk rivers to the same course at every LOD
     map.assignCity(constraints.city, constraints.sizeW, constraints.sizeH, param.city?.autoLayout ?? true);
     map.assignObjects(constraints.objects, constraints.sizeW, constraints.sizeH);
     map.assignTerrain(constraints.terrain, constraints.sizeW, constraints.sizeH);
+    map.assignTerrainBlend(tf.otherLabel, tf.blendFactor, tf.sizeW, tf.sizeH);
     // Rainfall comes from the world-level reference field (seamless);
     // the tile-local assignRainfall is only used on the reference itself.
     applyReferenceRainfall(map, ref);
@@ -272,7 +359,7 @@ function assignTile(map: MapGen, param: any, constraints: any, ref: RefField, sp
 }
 
 function handleGenTile(event) {
-    const {key, scene, lod, tx, ty, rect, genRect, refVersion, param, constraints, needsMesh} = event.data;
+    const {key, scene, lod, tx, ty, rect, genRect, refVersion, terrainVersion, param, constraints, needsMesh} = event.data;
     const spacing = baseSpacing * Math.pow(spacingFactor, -lod);
 
     // Reference field: rebuild only when the main thread bumped the version.
@@ -280,6 +367,18 @@ function handleGenTile(event) {
     if (!ref || ref.version !== refVersion) {
         ref = buildReference(refVersion ?? 0, param, constraints);
         references.set(scene, ref);
+    }
+
+    // Terrain blend field: rebuild only when the version or blendWidth
+    // changes (version is bumped once per generation round by the main
+    // thread, so all tiles in a round share the field).
+    const blendWidth = param.terrain?.blendWidth ?? 0;
+    const blendEnabled = param.terrain?.blendEnabled ?? true;
+    let tf = terrainFields.get(scene);
+    if (!tf || tf.version !== (terrainVersion ?? 0) || tf.blendWidth !== blendWidth
+        || tf.sizeW !== constraints.sizeW || tf.sizeH !== constraints.sizeH) {
+        tf = buildTerrainField(terrainVersion ?? 0, constraints.terrain, constraints.sizeW, constraints.sizeH, blendWidth, blendEnabled);
+        terrainFields.set(scene, tf);
     }
 
     // Build or reuse the tile mesh (shared across scenes).
@@ -301,13 +400,15 @@ function handleGenTile(event) {
 
     const quad_elements = new Int32Array(3 * mm.mesh.numSolidSides);
     const a_quad_em = new Float32Array(7 * (mm.mesh.numRegions + mm.mesh.numTriangles));
+    const a_terrain_blend = new Float32Array(2 * (mm.mesh.numRegions + mm.mesh.numTriangles));
     const numRiverVertices = 1.5 * 3 * mm.mesh.numSolidTriangles;
     const a_river_xyww = new Float32Array(numRiverVertices * 5);
 
     const start_time = performance.now();
 
-    const riversParam = assignTile(map, param, constraints, ref, spacing, rect, genRect);
+    const riversParam = assignTile(map, param, constraints, ref, tf, spacing, rect, genRect);
     Geometry.setMapGeometry(map, param.elevation.mountain_folds, quad_elements, a_quad_em);
+    Geometry.setTerrainBlendGeometry(map, a_terrain_blend);
     const numRiverTriangles = localRivers
         ? Geometry.setRiverGeometry(map, spacing, riversParam, a_river_xyww)
         : 0;
@@ -323,6 +424,7 @@ function handleGenTile(event) {
     const transferables = [
         quad_elements.buffer,
         a_quad_em.buffer,
+        a_terrain_blend.buffer,
         a_river_xyww.buffer,
         // NOTE: mesh triangles/halfedges are intentionally NOT transferred —
         // they are cached on this side and reused for every regeneration.
@@ -333,7 +435,7 @@ function handleGenTile(event) {
         type: 'tileReady',
         key, scene, lod, tx, ty,
         mesh,
-        quad_elements, a_quad_em, a_river_xyww,
+        quad_elements, a_quad_em, a_terrain_blend, a_river_xyww,
         numRiverTriangles,
         elapsed,
     }, transferables);

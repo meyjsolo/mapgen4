@@ -40,6 +40,12 @@ function getParam() { return params[activeScene]; }
  * stroke ends. */
 const envVersion = {wild: 0, city: 0};
 
+/* Bumped once per generation round (painting, terrain/elevation params,
+ * import). The workers cache the world-level terrain-blend distance field
+ * by this version and only rebuild it when it changes, so all tiles in a
+ * round share the field and panning/zooming never rebuilds it. */
+const envTerrainVersion = {wild: 0, city: 0};
+
 
 
 // each parameter is [initial value, low, high]
@@ -302,6 +308,7 @@ function main() {
             genRect: tile.genRect,
             rect: tile.rect,
             refVersion: envVersion[activeScene],
+            terrainVersion: envTerrainVersion[activeScene],
             param: workerParam,
             /* the mesh never changes per tile key: ask the worker to ship it
              * only when we don't already hold the geometry (first request or
@@ -355,6 +362,7 @@ function main() {
     function generate() {
         const rp = getParam().render;
         const visibleW = 200 / rp.zoom;
+        envTerrainVersion[activeScene]++;
         world.invalidateRect([rp.x - visibleW/2, rp.y - visibleW/2, visibleW, visibleW]);
         render.setCountryNames(Painting.countryNames);
         updateUI();
@@ -450,6 +458,7 @@ function main() {
             cityUI.selectedCityId = null;
             cityUI.rebuild();
             envVersion.wild++; envVersion.city++;
+            envTerrainVersion.wild++; envTerrainVersion.city++;
             generate();
         }).catch(err => {
             console.error("import failed", err);

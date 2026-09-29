@@ -343,6 +343,8 @@ const vert_drape = `
     in float a_zone;
     in float a_terrain;
     in float a_terrainweight;
+    in float a_otherTerrain;
+    in float a_blendFactor;
     out vec2 v_em, v_xy;
     out float v_z;
     flat out float v_country;
@@ -350,6 +352,39 @@ const vert_drape = `
     flat out float v_terrain;
     out float v_terrainweight;
     out vec3 v_terrain_color;
+
+    const vec3 neutral_land_biome = vec3(0.9, 0.8, 0.7);
+
+    // Per-vertex terrain color for a given label, evaluated at this vertex's
+    // biome (elevation/moisture). Painted labels mix the biome colormap;
+    // label 0 (auto) returns the raw biome color. Used for both the cell's
+    // own terrain and the nearest *other* painted terrain so the two can be
+    // crossfaded by a_blendFactor across a world-space blend band instead
+    // of the default one-cell hard edge.
+    vec3 terrainColorFor(float label, float weight) {
+        float z = 0.5 * (1.0 + a_em.x);
+        float m = a_em.y;
+        vec3 biome_at_vertex = mix(neutral_land_biome, texture(u_colormap, vec2(z, m)).rgb, u_biome_colors);
+        if (label < 0.5) return biome_at_vertex;
+        int ti = int(clamp(floor(label + 0.5), 0.0, 5.0));
+        vec3 c;
+        if (ti == 4) {            // desert
+            c = mix(texture(u_colormap, vec2(z, 0.04)).rgb, vec3(0.82, 0.68, 0.26), 0.25);
+        } else if (ti == 5) {     // dirt
+            c = mix(texture(u_colormap, vec2(z, 0.04)).rgb, vec3(0.32, 0.24, 0.11), 0.45);
+        } else if (ti == 2) {     // grass
+            c = mix(texture(u_colormap, vec2(z, 0.55)).rgb, vec3(0.40, 0.58, 0.20), 0.25);
+        } else if (ti == 1) {     // snow (rim shadow grades toward biome at the auto edge)
+            vec3 snow_base = texture(u_colormap, vec2(0.82, m)).rgb;
+            vec3 shadow = vec3(0.55, 0.58, 0.65);
+            c = mix(snow_base, shadow, 1.0 - weight);
+            c = mix(c, vec3(0.70, 0.74, 0.82), 0.25);
+        } else {                  // forest / default
+            c = u_terrainpalette[ti];
+        }
+        return mix(neutral_land_biome, c, u_biome_colors);
+    }
+
     void main() {
         v_em = a_em;
         v_country = a_country;
@@ -357,40 +392,20 @@ const vert_drape = `
         v_terrain = a_terrain;
         v_terrainweight = a_terrainweight;
 
-        // Per-vertex terrain color, smooth-interpolated across triangles so
-        // painted<->painted boundaries blend the two terrain colors directly
-        // (no biome band). Auto vertices carry the biome color sampled here
-        // so painted->auto still blends toward the natural biome. The colormap
-        // is sampled via vertex texture fetch (u_colormap is already bound to
-        // TEXTURE0 for this program, shared by both shader stages).
-        const vec3 neutral_land_biome = vec3(0.9, 0.8, 0.7);
-        // z = elevation remapped to the colormap's 0..1 texture coordinate,
-        // matching frag_land (e = 0.5*(1+v_e)) that the drape pass reads
-        // back via u_elevation; using a_em.x raw would sample the wrong texel.
-        float z = 0.5 * (1.0 + a_em.x);
-        float m = a_em.y;
-        vec3 biome_at_vertex = mix(neutral_land_biome, texture(u_colormap, vec2(z, m)).rgb, u_biome_colors);
-        if (a_terrain > 0.5) {
-            int ti = int(clamp(floor(a_terrain + 0.5), 0.0, 5.0));
-            vec3 c;
-            if (ti == 4) {            // desert
-                c = mix(texture(u_colormap, vec2(z, 0.04)).rgb, vec3(0.82, 0.68, 0.26), 0.25);
-            } else if (ti == 5) {     // dirt
-                c = mix(texture(u_colormap, vec2(z, 0.04)).rgb, vec3(0.62, 0.48, 0.22), 0.30);
-            } else if (ti == 2) {     // grass
-                c = mix(texture(u_colormap, vec2(z, 0.55)).rgb, vec3(0.40, 0.58, 0.20), 0.25);
-            } else if (ti == 1) {     // snow (rim shadow grades toward biome at the auto edge)
-                vec3 snow_base = texture(u_colormap, vec2(0.82, m)).rgb;
-                vec3 shadow = vec3(0.55, 0.58, 0.65);
-                c = mix(snow_base, shadow, 1.0 - a_terrainweight);
-                c = mix(c, vec3(0.70, 0.74, 0.82), 0.25);
-            } else {                  // forest / default
-                c = u_terrainpalette[ti];
-            }
-            v_terrain_color = mix(neutral_land_biome, c, u_biome_colors);
-        } else {
-            v_terrain_color = biome_at_vertex;
-        }
+        // Crossfade the own terrain color toward the nearest other painted
+        // terrain by a_blendFactor (0 far from a boundary, ~0.5 at one).
+        // a_otherTerrain/a_blendFactor are 0 on auto vertices, so auto cells
+        // keep their biome color; the painted<->auto fade stays in frag_drape.
+        // a_otherTerrain is read in the ternary condition (always evaluated)
+        // so it stays a statically-used attribute even on GLSL drivers that
+        // drop attributes only read inside an if-branch. The ternary is
+        // short-circuit, so the second terrainColorFor only runs where
+        // blending is active. a_blendFactor is read unconditionally by mix.
+        vec3 c_own = terrainColorFor(a_terrain, a_terrainweight);
+        vec3 c_other = a_otherTerrain > 0.5
+                     ? terrainColorFor(a_otherTerrain, a_terrainweight)
+                     : c_own;
+        v_terrain_color = mix(c_own, c_other, a_blendFactor);
 
         vec2 xy_clamped = clamp(a_xy, vec2(0.0, 0.0), u_world_size);
         v_z = max(0.0, a_em.x); // oceans with e<0 still rendered at z=0
@@ -685,6 +700,7 @@ type TileGeo = {
     mesh: Mesh;
     a_quad_xy: Float32Array;
     a_quad_em: Float32Array;
+    a_terrain_blend: Float32Array;
     quad_elements: Int32Array;
     quad_elements_length: number;
     a_river_xyww: Float32Array;
@@ -708,6 +724,7 @@ type TileGeo = {
 type TileGpu = {
     buffer_quad_xy: Buffer;
     buffer_quad_em: Buffer;
+    buffer_quad_terrainblend: Buffer;
     buffer_quad_elements: Buffer;
     buffer_river_xyww: Buffer;
     buffer_border_xy: Buffer | null;
@@ -911,6 +928,7 @@ export default class Renderer {
     onTileReady(tile: Tile, data: {
         mesh?: SerializedMesh;
         a_quad_em: Float32Array;
+        a_terrain_blend: Float32Array;
         quad_elements: Int32Array;
         a_river_xyww: Float32Array;
         numRiverTriangles: number;
@@ -923,6 +941,7 @@ export default class Renderer {
                 mesh,
                 a_quad_xy: new Float32Array(2 * (mesh.numRegions + mesh.numTriangles)),
                 a_quad_em: data.a_quad_em,
+                a_terrain_blend: data.a_terrain_blend,
                 quad_elements: data.quad_elements,
                 quad_elements_length: 3 * mesh.numSolidSides,
                 a_river_xyww: data.a_river_xyww,
@@ -943,6 +962,7 @@ export default class Renderer {
              * swap in the per-regen arrays — this skips the ~1.4MB mesh
              * clone + deserializeMesh (tens of ms on mobile) per tile */
             geo.a_quad_em = data.a_quad_em;
+            geo.a_terrain_blend = data.a_terrain_blend;
             geo.quad_elements = data.quad_elements;
             geo.quad_elements_length = 3 * geo.mesh.numSolidSides;
             geo.a_river_xyww = data.a_river_xyww;
@@ -993,7 +1013,7 @@ export default class Renderer {
         if (!geo) return;
         this.tileGeo.delete(tile.key);
         if (geo.gpu) {
-            const names = ['buffer_quad_xy', 'buffer_quad_em', 'buffer_quad_elements',
+            const names = ['buffer_quad_xy', 'buffer_quad_em', 'buffer_quad_terrainblend', 'buffer_quad_elements',
                            'buffer_river_xyww', 'buffer_border_xy', 'buffer_road_xy',
                            'buffer_buildings', 'buffer_trees', 'buffer_forest_canopies'];
             for (const name of names) {
@@ -1007,6 +1027,7 @@ export default class Renderer {
         return {
             buffer_quad_xy: this.webgl.createBuffer({update: 'static', data: geo.a_quad_xy}),
             buffer_quad_em: this.webgl.createBuffer({update: 'dynamic', data: geo.a_quad_em}),
+            buffer_quad_terrainblend: this.webgl.createBuffer({update: 'dynamic', data: geo.a_terrain_blend}),
             buffer_quad_elements: this.webgl.createBuffer({indices: true, update: 'dynamic', data: geo.quad_elements}),
             buffer_river_xyww: this.webgl.createBuffer({update: 'dynamic', data: geo.a_river_xyww}),
             buffer_border_xy: geo.a_border_xy ? this.webgl.createBuffer({update: 'dynamic', data: geo.a_border_xy}) : null,
@@ -1027,6 +1048,7 @@ export default class Renderer {
     private uploadTile(geo: TileGeo) {
         if (!geo.gpu) geo.gpu = this.createTileBuffers(geo);
         geo.gpu.buffer_quad_em.subdata(0, geo.a_quad_em);
+        geo.gpu.buffer_quad_terrainblend.subdata(0, geo.a_terrain_blend);
         geo.gpu.buffer_quad_elements.subdata(0, geo.quad_elements.subarray(0, geo.quad_elements_length));
         geo.gpu.buffer_river_xyww.subdata(0, geo.a_river_xyww.subarray(0, 5 * 3 * geo.numRiverTriangles));
         const border = this.ensureOverlayBuffer(geo, 'buffer_border_xy', geo.a_border_xy);
@@ -1122,6 +1144,8 @@ export default class Renderer {
         geo.gpu.buffer_quad_em.vertexAttribPointer(program.a_zone, 1, gl.FLOAT, false, 28, 12);
         geo.gpu.buffer_quad_em.vertexAttribPointer(program.a_terrain, 1, gl.FLOAT, false, 28, 20);
         geo.gpu.buffer_quad_em.vertexAttribPointer(program.a_terrainweight, 1, gl.FLOAT, false, 28, 24);
+        geo.gpu.buffer_quad_terrainblend.vertexAttribPointer(program.a_otherTerrain, 1, gl.FLOAT, false, 8, 0);
+        geo.gpu.buffer_quad_terrainblend.vertexAttribPointer(program.a_blendFactor, 1, gl.FLOAT, false, 8, 4);
     }
 
     /* ---- per-tile draw passes ---- */
