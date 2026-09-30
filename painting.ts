@@ -122,6 +122,20 @@ class Generator {
 }
 let heightMap = new Generator();
 
+const MAX_UNDO = 10;
+const undoStack: Float32Array[] = [];
+const redoStack: Float32Array[] = [];
+
+function pushSnapshot(stack: Float32Array[]) {
+    stack.push(Float32Array.from(heightMap.elevation));
+    if (stack.length > MAX_UNDO) { stack.shift(); }
+}
+
+function updateUndoRedoButtons() {
+    (document.getElementById('button-undo') as HTMLButtonElement).disabled = undoStack.length === 0;
+    (document.getElementById('button-redo') as HTMLButtonElement).disabled = redoStack.length === 0;
+}
+
 let exported = {
     width: CANVAS_WIDTH,
     height: CANVAS_HEIGHT,
@@ -130,12 +144,34 @@ let exported = {
     constraints: heightMap.elevation,
     setElevationParam: elevationParam => heightMap.setElevationParam(elevationParam),
     userHasPainted: () => heightMap.userHasPainted,
+    canUndo: () => undoStack.length > 0,
+    canRedo: () => redoStack.length > 0,
+    undo: () => {
+        if (undoStack.length === 0) return;
+        pushSnapshot(redoStack);
+        heightMap.elevation.set(undoStack.pop() as Float32Array);
+        heightMap.userHasPainted = undoStack.length > 0;
+        updateUndoRedoButtons();
+        exported.onUpdate();
+    },
+    redo: () => {
+        if (redoStack.length === 0) return;
+        pushSnapshot(undoStack);
+        heightMap.elevation.set(redoStack.pop() as Float32Array);
+        heightMap.userHasPainted = true;
+        updateUndoRedoButtons();
+        exported.onUpdate();
+    },
 };
 
 document.getElementById('button-reset').addEventListener('click', () => {
     heightMap.generate();
     exported.onUpdate();
 });
+
+document.getElementById('button-undo').addEventListener('click', () => { exported.undo(); });
+document.getElementById('button-redo').addEventListener('click', () => { exported.redo(); });
+updateUndoRedoButtons();
 
 
 const SIZES = {
@@ -184,6 +220,15 @@ window.addEventListener('keydown', e => {
     }
 });
 
+window.addEventListener('keydown', e => {
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    const mod = e.metaKey || e.ctrlKey;
+    const undo = mod && !e.shiftKey && e.key.toLowerCase() === 'z';
+    const redo = mod && ((e.shiftKey && e.key.toLowerCase() === 'z') || (!e.shiftKey && e.key.toLowerCase() === 'y'));
+    if (undo) { e.preventDefault(); exported.undo(); }
+    else if (redo) { e.preventDefault(); exported.redo(); }
+});
+
 for (let control of controls) {
     document.getElementById(control[1]).addEventListener('click', () => { control[2](); displayCurrentTool(); } );
 }
@@ -204,6 +249,9 @@ function setUpPaintEventHandling() {
         currentStroke.time.fill(0);
         currentStroke.strength.fill(0);
         currentStroke.previousElevation.set(heightMap.elevation);
+        pushSnapshot(undoStack);
+        redoStack.length = 0;
+        updateUndoRedoButtons();
         move(event);
     }
 
