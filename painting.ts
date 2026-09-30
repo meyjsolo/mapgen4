@@ -252,6 +252,43 @@ let exported = {
         updateUndoRedoButtons();
         exported.onUpdate();
     },
+    /* Serialize the painting state (constraint canvases, country names
+     * and flags) for the save/load feature. */
+    dumpScenes: () => ({
+        wild: {
+            seed: heightMap.seed,
+            island: heightMap.island,
+            elevation: Array.from(heightMap.elevation),
+            country: Array.from(heightMap.country),
+            terrain: Array.from(heightMap.terrain),
+            names: countryNames.slice(),
+            userHasPainted: heightMap.userHasPainted,
+            countryHasPainted: heightMap.countryHasPainted,
+            terrainHasPainted: heightMap.terrainHasPainted,
+        },
+    }),
+    loadScenes: (data: any) => {
+        const d = data?.wild;
+        if (!d) return;
+        heightMap.seed = d.seed;
+        heightMap.island = d.island;
+        heightMap.elevation.set(d.elevation);
+        heightMap.country.set(d.country);
+        heightMap.terrain.set(d.terrain);
+        for (let i = 0; i < NUM_COUNTRIES; i++) countryNames[i] = (d.names ?? [])[i] ?? '';
+        heightMap.userHasPainted = d.userHasPainted;
+        heightMap.countryHasPainted = d.countryHasPainted;
+        heightMap.terrainHasPainted = d.terrainHasPainted;
+        /* refresh country name inputs */
+        for (let i = 0; i < NUM_COUNTRIES; i++) {
+            const input = document.getElementById(`country-name-${i}`) as HTMLInputElement;
+            if (input) input.value = countryNames[i];
+        }
+        /* imported state replaces the history */
+        undoStack.length = 0;
+        redoStack.length = 0;
+        updateUndoRedoButtons();
+    },
 };
 
 document.getElementById('button-reset').addEventListener('click', () => {
