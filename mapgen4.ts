@@ -316,6 +316,11 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
     ioRow.appendChild(exportButton);
     ioRow.appendChild(importButton);
     ioRow.appendChild(fileInput);
+    const downloadImageButton = document.createElement('button');
+    downloadImageButton.setAttribute('id', 'button-export-image');
+    downloadImageButton.textContent = '导出图片';
+    downloadImageButton.addEventListener('click', download);
+    ioRow.appendChild(downloadImageButton);
     document.getElementById('sliders').appendChild(ioRow);
 }
 

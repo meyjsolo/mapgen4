@@ -842,8 +842,36 @@ export default class Renderer {
             if (!label.visible) continue;
             vec4.transformMat4(v, vec4.fromValues(label.x, label.y, 0, 1), this.projection);
             label.el.style.transform =
-                `translate(${((v[0] + 1) / 2 * W).toFixed(1)}px, ${((1 - v[1]) / 2 * H).toFixed(1)}px)`;
+                `translate(${((v[0] + 1) / 2 * W).toFixed(1)}px, ${((1 - v[1]) / 2 * H).toFixed(1)}px) translate(-50%, -50%)`;
         }
+    }
+
+    /* Draw the DOM overlays (country name labels + city markers) onto the
+     * screenshot canvas so they are included in the exported image. */
+    drawScreenshotOverlays(ctx: CanvasRenderingContext2D) {
+        const W = this.screenshotCanvas.width, H = this.screenshotCanvas.height;
+        for (const label of this.countryLabels) {
+            if (!label.visible) continue;
+            const [nx, ny] = this.worldToScreen(label.x, label.y);
+            this.drawBubbleLabel(ctx, label.el.textContent, nx * W, ny * H);
+        }
+        if (this.cityUI) this.cityUI.drawScreenshot(ctx, W, H);
+    }
+
+    private drawBubbleLabel(ctx: CanvasRenderingContext2D, text: string, x: number, y: number) {
+        ctx.save();
+        ctx.font = '13px sans-serif';
+        const pad = 6, bh = 18;
+        const bw = ctx.measureText(text).width + pad * 2;
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.beginPath();
+        ctx.roundRect(x - bw/2, y - bh/2, bw, bh, 3);
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, x, y);
+        ctx.restore();
     }
 
     /* Allow drawing at a different resolution than the internal texture size */
@@ -1028,10 +1056,13 @@ export default class Renderer {
                     const rowBuffer = new Uint8Array(buffer.buffer, y * bytesPerRow, bytesPerRow);
                     imageData.data.set(rowBuffer, (this.screenshotCanvas.height-y-1) * bytesPerRow);
                 }
-                ctx.putImageData(imageData, 0, 0);
+            ctx.putImageData(imageData, 0, 0);
 
-                this.screenshotCallback();
-                this.screenshotCallback = null;
+            /* draw DOM overlays (country labels + city markers) into the image */
+            this.drawScreenshotOverlays(ctx);
+
+            this.screenshotCallback();
+            this.screenshotCallback = null;
             }
 
             clearBuffers();
