@@ -236,6 +236,80 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
 
     const downloadButton = document.getElementById('button-download');
     if (downloadButton) downloadButton.addEventListener('click', download);
+
+    /* ---- export / import map state ---- */
+
+    function syncSliders() {
+        for (let phase of ['elevation', 'biomes', 'rivers', 'render']) {
+            for (let [name] of initialParams[phase]) {
+                const input = document.querySelector(`#slider-${name} input`) as HTMLInputElement;
+                if (input) input.value = String(param[phase][name]);
+            }
+        }
+    }
+
+    function exportState() {
+        const data = {
+            param,
+            scenes: Painting.dumpScenes(),
+            cities: cityManager.toJSON(),
+        };
+        const blob = new Blob([JSON.stringify(data)], {type: 'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.setAttribute('download', 'mapgen4-save.json');
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    function importState(file: File) {
+        file.text().then(text => {
+            const data = JSON.parse(text);
+            if (!data || !data.scenes) { throw "bad save file"; }
+            Painting.loadScenes(data.scenes);
+            if (data.param) {
+                for (let phase of ['elevation', 'biomes', 'rivers', 'render']) {
+                    Object.assign(param[phase], data.param[phase] ?? {});
+                }
+                syncSliders();
+            }
+            if (data.cities) {
+                cityManager.fromJSON(data.cities);
+                cityUI.selectedCityId = null;
+                cityUI.rebuild();
+            }
+            generate();
+        }).catch(err => {
+            console.error("import failed", err);
+            alert("导入失败：文件格式不正确");
+        });
+    }
+
+    const exportButton = document.createElement('button');
+    exportButton.setAttribute('id', 'button-export');
+    exportButton.textContent = '导出地图';
+    exportButton.addEventListener('click', exportState);
+
+    const importButton = document.createElement('button');
+    importButton.setAttribute('id', 'button-import');
+    importButton.textContent = '导入地图';
+    const fileInput = document.createElement('input');
+    fileInput.setAttribute('type', 'file');
+    fileInput.setAttribute('accept', '.json');
+    fileInput.style.display = 'none';
+    importButton.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files && fileInput.files[0]) { importState(fileInput.files[0]); }
+        fileInput.value = '';
+    });
+
+    const ioRow = document.createElement('div');
+    ioRow.setAttribute('id', 'io-row');
+    ioRow.appendChild(exportButton);
+    ioRow.appendChild(importButton);
+    ioRow.appendChild(fileInput);
+    document.getElementById('sliders').appendChild(ioRow);
 }
 
 makeMesh().then(main);
