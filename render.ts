@@ -10,6 +10,7 @@ import {vec2, vec4, mat4} from 'gl-matrix';
 import colormap from "./colormap.ts";
 import Geometry from "./geometry.ts";
 import param from "./config.js";
+import {NUM_TERRAINS, terrainPalette as terrainColors} from "./terrains.ts";
 import type {Mesh} from "./types.d.ts";
 
 //////////////////////////////////////////////////////////////////////
@@ -328,17 +329,73 @@ const frag_depth = `
 const vert_drape = `
     precision highp float;
     uniform mat4 u_projection;
+    uniform sampler2D u_colormap;
+    uniform float u_biome_colors;
+    uniform vec3 u_terrainpalette[8];
     in vec2 a_xy;
     in vec2 a_em;
+    in float a_terrain;
+    in float a_terrainweight;
+    in float a_otherTerrain;
+    in float a_blendFactor;
     out vec2 v_em, v_uv, v_xy;
     out float v_z;
+    out float v_terrainweight;
+    out vec3 v_terrain_color;
+
+    const vec3 neutral_land_biome = vec3(0.9, 0.8, 0.7);
+
+    // Per-vertex terrain color for a given label, evaluated at this vertex's
+    // biome (elevation/moisture). Painted labels mix the biome colormap;
+    // label 0 (auto) returns the raw biome color. Used for both the cell's
+    // own terrain and the nearest *other* painted terrain so the two can be
+    // crossfaded by a_blendFactor across a world-space blend band instead
+    // of the default one-cell hard edge.
+    vec3 terrainColorFor(float label, float weight) {
+        float z = 0.5 * (1.0 + a_em.x);
+        float m = a_em.y;
+        vec3 biome_at_vertex = mix(neutral_land_biome, texture(u_colormap, vec2(z, m)).rgb, u_biome_colors);
+        if (label < 0.5) return biome_at_vertex;
+        int ti = int(clamp(floor(label + 0.5), 0.0, 5.0));
+        vec3 c;
+        if (ti == 4) {            // desert
+            c = mix(texture(u_colormap, vec2(z, 0.04)).rgb, vec3(0.82, 0.68, 0.26), 0.25);
+        } else if (ti == 5) {     // dirt
+            c = mix(texture(u_colormap, vec2(z, 0.04)).rgb, vec3(0.32, 0.24, 0.11), 0.45);
+        } else if (ti == 2) {     // grass
+            c = mix(texture(u_colormap, vec2(z, 0.55)).rgb, vec3(0.40, 0.58, 0.20), 0.25);
+        } else if (ti == 1) {     // snow (rim shadow grades toward biome at the auto edge)
+            vec3 snow_base = texture(u_colormap, vec2(0.82, m)).rgb;
+            vec3 shadow = vec3(0.55, 0.58, 0.65);
+            c = mix(snow_base, shadow, 1.0 - weight);
+            c = mix(c, vec3(0.70, 0.74, 0.82), 0.25);
+        } else {                  // forest / default
+            c = u_terrainpalette[ti];
+        }
+        return mix(neutral_land_biome, c, u_biome_colors);
+    }
+
     void main() {
         v_em = a_em;
+        v_terrainweight = a_terrainweight;
+
+        // Crossfade the own terrain color toward the nearest other painted
+        // terrain by a_blendFactor (0 far from a boundary, ~0.5 at one).
+        // a_otherTerrain/a_blendFactor are 0 on auto vertices, so auto cells
+        // keep their biome color; the painted<->auto fade stays in frag_drape.
+        vec3 c_own = terrainColorFor(a_terrain, a_terrainweight);
+        vec3 c_other = a_otherTerrain > 0.5
+                     ? terrainColorFor(a_otherTerrain, a_terrainweight)
+                     : c_own;
+        v_terrain_color = mix(c_own, c_other, a_blendFactor);
+
         vec2 xy_clamped = clamp(a_xy, vec2(0, 0), vec2(${param.map.width}, ${param.map.height}));
         v_z = max(0.0, a_em.x); // oceans with e<0 still rendered at z=0
         if (xy_clamped != a_xy) { // boundary points
             v_z = -0.5;
             v_em = vec2(0.0, 0.0);
+            v_terrainweight = 0.0;
+            v_terrain_color = vec3(0.0);
         }
         vec4 pos = vec4(u_projection * vec4(xy_clamped, v_z, 1));
         v_uv = a_xy / vec2(${param.map.width}.0, ${param.map.height}.0);
@@ -360,6 +417,8 @@ const frag_drape = `
                   u_biome_colors;
     in vec2 v_uv, v_xy, v_em;
     in float v_z;
+    in float v_terrainweight;
+    in vec3 v_terrain_color;
     out vec4 out_fragcolor;
 
     const vec3 neutral_land_biome = vec3(0.9, 0.8, 0.7);
@@ -391,6 +450,18 @@ const frag_drape = `
         vec3 biome_color = texture(u_colormap, vec2(z, v_em.y)).rgb;
         water_color = mix(vec4(neutral_water_biome * (1.2 - water_color.a), water_color.a), water_color, u_biome_colors);
         biome_color = mix(neutral_biome_color, biome_color, u_biome_colors);
+
+        // Explicit terrain: v_terrain_color is computed per-vertex in
+        // vert_drape (terrain color for painted cells, biome color for
+        // auto cells) and smooth-interpolated across triangles.
+        // v_terrainweight fades only at painted->auto boundaries (see
+        // Map.assignTerrain), so painted<->painted edges blend the two
+        // terrain colors directly (no biome band) while painted->auto
+        // still crossfades into the per-fragment biome color here.
+        if (v_terrainweight > 0.001) {
+            biome_color = mix(biome_color, v_terrain_color, v_terrainweight);
+        }
+
         if (v_z < 0.0) {
             // at the exterior boundary, we'll draw soil or water underground
             float land_or_water = smoothstep(0.0, -0.001, v_em.x - v_z);
@@ -474,6 +545,7 @@ export default class Renderer {
     webgl: WebGLWrapper;
 
     texture_colormap: Texture;
+    terrainPalette: Float32Array;
 
     fbo_river: Framebuffer;
     fbo_land: Framebuffer;
@@ -506,7 +578,9 @@ export default class Renderer {
         this.inverse_projection = mat4.create();
 
         this.a_quad_xy = new Float32Array(2 * (mesh.numRegions + mesh.numTriangles));
-        this.a_quad_em = new Float32Array(2 * (mesh.numRegions + mesh.numTriangles));
+        /* per-vertex layout: elevation, rainfall, terrain, terrainWeight,
+         * terrainOther, terrainBlend */
+        this.a_quad_em = new Float32Array(6 * (mesh.numRegions + mesh.numTriangles));
         this.quad_elements_length = 3 * mesh.numSolidSides;
         this.quad_elements = new Int32Array(this.quad_elements_length);
         /* NOTE: The maximum number of river triangles will be when
@@ -516,6 +590,14 @@ export default class Renderer {
          * there will be 1.5 output triangles per input triangle. */
         const numRiverVertices = 1.5 /* river triangles per input triangle */ * 3 /* vertices per triangle */ * mesh.numSolidTriangles;
         this.a_river_xyww = new Float32Array(numRiverVertices * 4);
+
+        this.terrainPalette = new Float32Array(3 * NUM_TERRAINS);
+        for (let i = 0; i < NUM_TERRAINS; i++) {
+            let [r, g, b] = terrainColors[i];
+            this.terrainPalette[3*i] = r;
+            this.terrainPalette[3*i+1] = g;
+            this.terrainPalette[3*i+2] = b;
+        }
 
         Geometry.setMeshGeometry(mesh, this.a_quad_xy);
 
@@ -538,17 +620,21 @@ export default class Renderer {
         });
         this.program_land  = this.webgl.createProgram('land', vert_land,  frag_land, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 0, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 24, 0);
             this.buffer_quad_elements.bind();
         });
         this.program_depth = this.webgl.createProgram('depth', vert_depth, frag_depth, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 0, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 24, 0);
             this.buffer_quad_elements.bind();
         });
         this.program_drape = this.webgl.createProgram('drape', vert_drape, frag_drape, (gl, program) => {
             this.buffer_quad_xy.vertexAttribPointer(program.a_xy, 2, gl.FLOAT, false, 0, 0);
-            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 0, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_em, 2, gl.FLOAT, false, 24, 0);
+            this.buffer_quad_em.vertexAttribPointer(program.a_terrain, 1, gl.FLOAT, false, 24, 8);
+            this.buffer_quad_em.vertexAttribPointer(program.a_terrainweight, 1, gl.FLOAT, false, 24, 12);
+            this.buffer_quad_em.vertexAttribPointer(program.a_otherTerrain, 1, gl.FLOAT, false, 24, 16);
+            this.buffer_quad_em.vertexAttribPointer(program.a_blendFactor, 1, gl.FLOAT, false, 24, 20);
             this.buffer_quad_elements.bind();
         });
         this.program_final = this.webgl.createProgram('final', vert_final, frag_final, (gl, program) => {
@@ -656,6 +742,9 @@ export default class Renderer {
             gl.uniform1f(program.u_outline_strength, renderParam.outline_strength);
             gl.uniform1f(program.u_outline_threshold, renderParam.outline_threshold / param.map.height);
             gl.uniform1f(program.u_biome_colors, renderParam.biome_colors);
+
+            const u_terrainpalette = program['u_terrainpalette[0]'];
+            if (u_terrainpalette) gl.uniform3fv(u_terrainpalette, this.terrainPalette);
 
             this.texture_colormap.activate(gl.TEXTURE0, program.u_colormap);
             this.fbo_land.texture.activate(gl.TEXTURE1, program.u_elevation);

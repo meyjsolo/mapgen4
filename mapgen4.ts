@@ -185,9 +185,10 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
 
     function updateUI() {
         let userHasPainted = Painting.userHasPainted();
+        let terrainHasPainted = Painting.terrainHasPainted();
         (document.querySelector("#slider-seed input") as HTMLInputElement).disabled = userHasPainted;
         (document.querySelector("#slider-island input") as HTMLInputElement).disabled = userHasPainted;
-        (document.querySelector("#button-reset") as HTMLInputElement).disabled = !userHasPainted;
+        (document.querySelector("#button-reset") as HTMLInputElement).disabled = !(userHasPainted || terrainHasPainted);
     }
     
     function generate() {
@@ -200,6 +201,7 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
                 constraints: {
                     size: {width: Painting.width, height: Painting.height},
                     constraints: Painting.constraints,
+                    terrain: Painting.terrain,
                 },
                 quad_elements_buffer: render.quad_elements.buffer,
                 a_quad_em_buffer: render.a_quad_em.buffer,

@@ -15,6 +15,15 @@ export default {
         width: 2000,
         height: 1000,
     },
+    terrain: {
+        /* Terrain Boundary Color Blending: crossfade adjacent painted
+         * terrains (forest<->grass, etc.) over a world-space band instead
+         * of the default one-cell hard edge. blendWidth is in world units
+         * and extends blendWidth into each side (total 2*blendWidth).
+         * blendWidth = 0 (or blendEnabled = false) restores hard edges. */
+        blendEnabled: true,
+        blendWidth: 120,
+    },
     mesh: {
         seed: 12345,
     },

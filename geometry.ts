@@ -29,16 +29,22 @@ function setMeshGeometry(mesh: Mesh, P: Float32Array) {
  * Fill an indexed buffer with data from the map.
  */
 function setMapGeometry(map: Map, mountain_folds: number, I: Int32Array, P: Float32Array) {
-    let {mesh, flow_s, elevation_r, elevation_t, rainfall_r} = map;
+    let {mesh, flow_s, elevation_r, elevation_t, rainfall_r,
+         terrain_r, terrain_t, terrainWeight_r, terrainWeight_t,
+         terrainOther_r, terrainOther_t, terrainBlend_r, terrainBlend_t} = map;
     let {numSolidSides, numRegions, numTriangles, is_boundary_t} = mesh;
 
     if (I.length !== 3 * numSolidSides) { throw "wrong size"; }
-    if (P.length !== 2 * (numRegions + numTriangles)) { throw "wrong size"; }
+    if (P.length !== 6 * (numRegions + numTriangles)) { throw "wrong size"; }
 
     let p = 0;
     for (let r = 0; r < numRegions; r++) {
         P[p++] = elevation_r[r];
         P[p++] = rainfall_r[r];
+        P[p++] = terrain_r[r];
+        P[p++] = terrainWeight_r[r];
+        P[p++] = terrainOther_r[r];
+        P[p++] = terrainBlend_r[r];
     }
     for (let t = 0; t < numTriangles; t++) {
         // The quadrilateral's folds can have a lower elevation to
@@ -51,6 +57,10 @@ function setMapGeometry(map: Map, mountain_folds: number, I: Int32Array, P: Floa
             r2 = mesh.r_begin_s(s0+1),
             r3 = mesh.r_begin_s(s0+2);
         P[p++] = 1/3 * (rainfall_r[r1] + rainfall_r[r2] + rainfall_r[r3]);
+        P[p++] = terrain_t[t];
+        P[p++] = terrainWeight_t[t];
+        P[p++] = terrainOther_t[t];
+        P[p++] = terrainBlend_t[t];
     }
 
     let i = 0;
