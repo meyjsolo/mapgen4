@@ -228,6 +228,42 @@ export default class CityUI {
         }
     }
 
+    /* Draw every placed, on-screen city (marker dot + name label) onto the
+     * screenshot canvas, so they are included in the exported image. */
+    drawScreenshot(ctx: CanvasRenderingContext2D, W: number, H: number) {
+        for (const c of this.cities.getCities()) {
+            if (!c.placed) continue;
+            const [nx, ny] = this.render.worldToScreen(c.x, c.y);
+            if (nx < -0.05 || nx > 1.05 || ny < -0.05 || ny > 1.05) continue;
+            const x = nx * W, y = ny * H;
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(x, y, 8, 0, Math.PI * 2);
+            ctx.fillStyle = '#ff4d4d';
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#fff';
+            ctx.stroke();
+            ctx.restore();
+            if (c.name) {
+                ctx.save();
+                ctx.font = '13px sans-serif';
+                const pad = 6, bh = 18;
+                const bw = ctx.measureText(c.name).width + pad * 2;
+                const ly = y - 26;
+                ctx.fillStyle = 'rgba(0,0,0,0.62)';
+                ctx.beginPath();
+                ctx.roundRect(x - bw/2, ly - bh/2, bw, bh, 3);
+                ctx.fill();
+                ctx.fillStyle = '#fff';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(c.name, x, ly);
+                ctx.restore();
+            }
+        }
+    }
+
     /* ---- selection ---- */
 
     private selectCity(id: string) {
