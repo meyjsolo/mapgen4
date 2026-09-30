@@ -62,6 +62,8 @@ const initialParams = {
         ['outline_coast', 0, 0, 1],
         ['outline_water', 13.0, 0, 20], // things start going wrong when this is high
         ['biome_colors', 1, 0, 1],
+        ['country_strength', 0.5, 0, 1],
+        ['country_borders', 1.0, 0, 1],
     ],
 };
 
@@ -164,7 +166,7 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
     
     worker.addEventListener('message', event => {
         working = false;
-        let {elapsed, numRiverTriangles, quad_elements_buffer, a_quad_em_buffer, a_river_xyww_buffer} = event.data;
+        let {elapsed, numRiverTriangles, numBorderSegments, quad_elements_buffer, a_quad_em_buffer, a_river_xyww_buffer, a_border_xy_buffer} = event.data;
         elapsedTimeHistory.push(elapsed | 0);
         if (elapsedTimeHistory.length > 10) { elapsedTimeHistory.splice(0, 1); }
         const timingDiv = document.getElementById('timing');
@@ -172,7 +174,9 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
         render.quad_elements = new Int32Array(quad_elements_buffer);
         render.a_quad_em = new Float32Array(a_quad_em_buffer);
         render.a_river_xyww = new Float32Array(a_river_xyww_buffer);
+        render.a_border_xy = new Float32Array(a_border_xy_buffer);
         render.numRiverTriangles = numRiverTriangles;
+        render.numBorderSegments = numBorderSegments;
         render.updateMap();
         redraw();
         if (workRequested) {
@@ -186,15 +190,17 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
     function updateUI() {
         let userHasPainted = Painting.userHasPainted();
         let terrainHasPainted = Painting.terrainHasPainted();
+        let countryHasPainted = Painting.countryHasPainted();
         (document.querySelector("#slider-seed input") as HTMLInputElement).disabled = userHasPainted;
         (document.querySelector("#slider-island input") as HTMLInputElement).disabled = userHasPainted;
-        (document.querySelector("#button-reset") as HTMLInputElement).disabled = !(userHasPainted || terrainHasPainted);
+        (document.querySelector("#button-reset") as HTMLInputElement).disabled = !(userHasPainted || terrainHasPainted || countryHasPainted);
     }
     
     function generate() {
         if (!working) {
             working = true;
             Painting.setElevationParam(param.elevation);
+            render.setCountryNames(Painting.countryNames);
             updateUI();
             worker.postMessage({
                 param,
@@ -202,14 +208,17 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
                     size: {width: Painting.width, height: Painting.height},
                     constraints: Painting.constraints,
                     terrain: Painting.terrain,
+                    country: Painting.country,
                 },
                 quad_elements_buffer: render.quad_elements.buffer,
                 a_quad_em_buffer: render.a_quad_em.buffer,
                 a_river_xyww_buffer: render.a_river_xyww.buffer,
+                a_border_xy_buffer: render.a_border_xy.buffer,
             }, [
                 render.quad_elements.buffer,
                 render.a_quad_em.buffer,
                 render.a_river_xyww.buffer,
+                render.a_border_xy.buffer,
             ]
             );
         } else {

@@ -15,6 +15,7 @@
 import {createNoise2D} from 'simplex-noise';
 import {makeRandFloat} from '@redblobgames/prng';
 import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, TERRAIN_FOREST, TERRAIN_DESERT, TERRAIN_DIRT} from "./terrains.ts";
+import {NUM_COUNTRIES, countryPalette} from "./countries.ts";
 
 const CANVAS_WIDTH = 256;
 const CANVAS_HEIGHT = 128;
@@ -35,12 +36,15 @@ class Generator {
     island = 0;
     userHasPainted = false;
     terrainHasPainted = false;
+    countryHasPainted = false;
     elevation: Float32Array;
     terrain: Float32Array;
+    country: Float32Array;
     
     constructor () {
         this.elevation = new Float32Array(CANVAS_WIDTH * CANVAS_HEIGHT);
         this.terrain = new Float32Array(CANVAS_WIDTH * CANVAS_HEIGHT);
+        this.country = new Float32Array(CANVAS_WIDTH * CANVAS_HEIGHT).fill(-1);
     }
 
     setElevationParam(elevationParam) {
@@ -85,6 +89,8 @@ class Generator {
         this.userHasPainted = false;
         this.terrain.fill(0);
         this.terrainHasPainted = false;
+        this.country.fill(-1);
+        this.countryHasPainted = false;
     }
 
     /**
@@ -160,11 +166,34 @@ class Generator {
 
         this.terrainHasPainted = true;
     }
+
+    /**
+     * Stamp the current country id onto a constant-filled disc. x0, y0
+     * should be 0 to 1; radius is the brush size in canvas texels.
+     */
+    paintCountryAt(countryId: number, x0: number, y0: number, outerRadius: number) {
+        let {country} = this;
+        let xc = (x0 * CANVAS_WIDTH) | 0, yc = (y0 * CANVAS_HEIGHT) | 0;
+        let top = Math.ceil(Math.max(0, yc - outerRadius)),
+            bottom = Math.floor(Math.min(CANVAS_HEIGHT-1, yc + outerRadius));
+        for (let y = top; y <= bottom; y++) {
+            let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
+            let left = Math.max(0, xc - s),
+                right = Math.min(CANVAS_WIDTH-1, xc + s);
+            for (let x = left; x <= right; x++) {
+                country[y * CANVAS_WIDTH + x] = countryId;
+            }
+        }
+
+        this.countryHasPainted = true;
+    }
 }
 let heightMap = new Generator();
 
+const countryNames: string[] = new Array(NUM_COUNTRIES).fill('');
+
 const MAX_UNDO = 10;
-type Snapshot = { elevation: Float32Array; terrain: Float32Array };
+type Snapshot = { elevation: Float32Array; terrain: Float32Array; country: Float32Array };
 const undoStack: Snapshot[] = [];
 const redoStack: Snapshot[] = [];
 
@@ -172,6 +201,7 @@ function pushSnapshot(stack: Snapshot[]) {
     stack.push({
         elevation: Float32Array.from(heightMap.elevation),
         terrain: Float32Array.from(heightMap.terrain),
+        country: Float32Array.from(heightMap.country),
     });
     if (stack.length > MAX_UNDO) { stack.shift(); }
 }
@@ -188,9 +218,12 @@ let exported = {
     screenToWorldCoords: coords => coords,
     constraints: heightMap.elevation,
     terrain: heightMap.terrain,
+    country: heightMap.country,
+    countryNames,
     setElevationParam: elevationParam => heightMap.setElevationParam(elevationParam),
     userHasPainted: () => heightMap.userHasPainted,
     terrainHasPainted: () => heightMap.terrainHasPainted,
+    countryHasPainted: () => heightMap.countryHasPainted,
     canUndo: () => undoStack.length > 0,
     canRedo: () => redoStack.length > 0,
     undo: () => {
@@ -199,8 +232,10 @@ let exported = {
         const s = undoStack.pop() as Snapshot;
         heightMap.elevation.set(s.elevation);
         heightMap.terrain.set(s.terrain);
+        heightMap.country.set(s.country);
         heightMap.userHasPainted = undoStack.length > 0;
         heightMap.terrainHasPainted = heightMap.terrain.some(v => v > 0);
+        heightMap.countryHasPainted = heightMap.country.some(v => v >= 0);
         updateUndoRedoButtons();
         exported.onUpdate();
     },
@@ -210,8 +245,10 @@ let exported = {
         const s = redoStack.pop() as Snapshot;
         heightMap.elevation.set(s.elevation);
         heightMap.terrain.set(s.terrain);
+        heightMap.country.set(s.country);
         heightMap.userHasPainted = true;
         heightMap.terrainHasPainted = heightMap.terrain.some(v => v > 0);
+        heightMap.countryHasPainted = heightMap.country.some(v => v >= 0);
         updateUndoRedoButtons();
         exported.onUpdate();
     },
@@ -266,7 +303,11 @@ function displayCurrentTool() {
     for (let c of document.querySelectorAll("."+className)) {
         c.classList.remove(className);
     }
-    document.getElementById(currentTool).classList.add(className);
+    if (currentTool === 'country') {
+        document.getElementById(`country-${currentCountry}`).classList.add(className);
+    } else {
+        document.getElementById(currentTool).classList.add(className);
+    }
     document.getElementById(currentSize).classList.add(className);
 }
 
@@ -304,6 +345,40 @@ for (let control of controls) {
 /* terrain brush buttons (snow/grass/forest/desert/dirt) in embed.html */
 for (let t of TERRAIN_TOOLS) {
     document.getElementById(t.key).addEventListener('click', () => { currentTool = t.key; displayCurrentTool(); } );
+}
+
+/* Country brushes: clicking a swatch selects that country and switches
+ * the active tool to country painting. Each row also has a text input
+ * for the country name, shown on the map once the country is painted. */
+let currentCountry = 0;
+const countryToolbar = document.getElementById('countries');
+for (let i = 0; i < NUM_COUNTRIES; i++) {
+    const [r, g, b] = countryPalette[i];
+    const row = document.createElement('div');
+    row.setAttribute('class', 'country-row');
+
+    const btn = document.createElement('button');
+    btn.setAttribute('id', `country-${i}`);
+    btn.setAttribute('title', `country ${i+1} (paint with this brush)`);
+    btn.style.background = `rgb(${255*r|0},${255*g|0},${255*b|0})`;
+    btn.addEventListener('click', () => {
+        currentTool = 'country';
+        currentCountry = i;
+        displayCurrentTool();
+    });
+
+    const input = document.createElement('input');
+    input.setAttribute('id', `country-name-${i}`);
+    input.setAttribute('type', 'text');
+    input.setAttribute('placeholder', 'name');
+    input.addEventListener('input', () => {
+        countryNames[i] = input.value;
+        exported.onUpdate();
+    });
+
+    row.appendChild(btn);
+    row.appendChild(input);
+    countryToolbar.appendChild(row);
 }
 displayCurrentTool();
 
@@ -364,22 +439,28 @@ function setUpPaintEventHandling() {
             // Hold down shift to paint slowly
             brushSize = {...brushSize, rate: brushSize.rate/4};
         }
-        const terrainTool = TERRAIN_TOOL_KEYS.includes(currentTool)
-            ? TERRAIN_TOOLS.find(t => t.key === currentTool) : undefined;
-        if (terrainTool) {
-            // Terrain brushes also raise/lower the elevation so the
-            // painted terrain matches the relief (snow raises it like
-            // mountains, grass/desert/dirt keep it low like valleys).
-            heightMap.paintAt({elevation: terrainTool.elevation}, coords[0], coords[1],
-                              brushSize, nowMs - timestamp);
-            heightMap.paintTerrainAt(terrainTool.type, coords[0], coords[1],
-                                     brushSize.outerRadius, terrainTool.minElevation);
+        if (currentTool === 'country') {
+            // Countries stamp the selected country id as a constant
+            // disc, so moving the brush edits the borders directly.
+            heightMap.paintCountryAt(currentCountry, coords[0], coords[1], brushSize.outerRadius);
         } else {
-            // Original terrain brushes also clear any explicit terrain
-            // type (snow/grass/...) so their colors cover the painted area.
-            heightMap.paintTerrainAt(TERRAIN_NONE, coords[0], coords[1], brushSize.outerRadius);
-            heightMap.paintAt(TOOLS[currentTool], coords[0], coords[1],
-                              brushSize, nowMs - timestamp);
+            const terrainTool = TERRAIN_TOOL_KEYS.includes(currentTool)
+                ? TERRAIN_TOOLS.find(t => t.key === currentTool) : undefined;
+            if (terrainTool) {
+                // Terrain brushes also raise/lower the elevation so the
+                // painted terrain matches the relief (snow raises it like
+                // mountains, grass/desert/dirt keep it low like valleys).
+                heightMap.paintAt({elevation: terrainTool.elevation}, coords[0], coords[1],
+                                  brushSize, nowMs - timestamp);
+                heightMap.paintTerrainAt(terrainTool.type, coords[0], coords[1],
+                                         brushSize.outerRadius, terrainTool.minElevation);
+            } else {
+                // Original terrain brushes also clear any explicit terrain
+                // type (snow/grass/...) so their colors cover the painted area.
+                heightMap.paintTerrainAt(TERRAIN_NONE, coords[0], coords[1], brushSize.outerRadius);
+                heightMap.paintAt(TOOLS[currentTool], coords[0], coords[1],
+                                  brushSize, nowMs - timestamp);
+            }
         }
         timestamp = nowMs;
         exported.onUpdate();
