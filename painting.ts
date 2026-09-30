@@ -215,6 +215,7 @@ let exported = {
     width: CANVAS_WIDTH,
     height: CANVAS_HEIGHT,
     onUpdate: () => {},
+    onReset: () => {},
     screenToWorldCoords: coords => coords,
     constraints: heightMap.elevation,
     terrain: heightMap.terrain,
@@ -293,6 +294,7 @@ let exported = {
 
 document.getElementById('button-reset').addEventListener('click', () => {
     heightMap.generate();
+    exported.onReset();
     exported.onUpdate();
 });
 
