@@ -46,8 +46,8 @@ const initialParams = {
     ],
     render: [
         ['zoom', 100/480, 100/1000, 100/50],
-        ['x', 500, 0, 1000],
-        ['y', 500, 0, 1000],
+        ['x', param.map.width/2, 0, param.map.width],
+        ['y', param.map.height/2, 0, param.map.height],
         ['light_angle_deg', 80, 0, 360],
         ['slope', 2, 0, 5],
         ['flat', 2.5, 0, 5],
@@ -55,7 +55,7 @@ const initialParams = {
         ['overhead', 30, 0, 60],
         ['tilt_deg', 0, 0, 90],
         ['rotate_deg', 0, -180, 180],
-        ['mountain_height', 50, 0, 250],
+        ['mountain_height', 80, 0, 250],
         ['outline_depth', 1, 0, 2],
         ['outline_strength', 15, 0, 30],
         ['outline_threshold', 0, 0, 100],
@@ -146,7 +146,7 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
     
     Painting.screenToWorldCoords = (coords) => {
         let out = render.screenToWorld(coords);
-        return [out[0] / 1000, out[1] / 1000];
+        return [out[0] / param.map.width, out[1] / param.map.height];
     };
 
     Painting.onUpdate = () => {
@@ -198,7 +198,7 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
             worker.postMessage({
                 param,
                 constraints: {
-                    size: Painting.size,
+                    size: {width: Painting.width, height: Painting.height},
                     constraints: Painting.constraints,
                 },
                 quad_elements_buffer: render.quad_elements.buffer,

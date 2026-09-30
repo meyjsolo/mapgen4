@@ -7,8 +7,9 @@
  */
 
 import {type PointsData} from "./generate-points.ts";
+import param from "./config.js";
 
-const MAP_FLOAT_RANGE: [number, number] = [-100, 1000 + 100]; // assume spacing < 100
+const MAP_FLOAT_RANGE: [number, number] = [-100, param.map.width + 100]; // assume spacing < 100
 const UINT_RANGE: [number, number] = [0, (1 << 16) - 1];
 
 function rescale(value: number, before: [number, number], after: [number, number]): number {

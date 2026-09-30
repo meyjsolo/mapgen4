@@ -11,6 +11,7 @@ import {createNoise2D} from 'simplex-noise';
 import FlatQueue from 'flatqueue';
 import {makeRandFloat} from '@redblobgames/prng';
 import {clamp} from "./geometry.ts";
+import param from "./config.js";
 import type {Mesh} from "./types.d.ts";
 
 type PrecalculatedNoise = {
@@ -67,8 +68,8 @@ function precalculateNoise(randFloat: () => number, mesh: Mesh): PrecalculatedNo
         noise5_t = new Float32Array(numTriangles),
         noise6_t = new Float32Array(numTriangles);
     for (let t = 0; t < numTriangles; t++) {
-        let nx = (mesh.x_of_t(t)-500) / 500,
-            ny = (mesh.y_of_t(t)-500) / 500;
+        let nx = (mesh.x_of_t(t) - param.map.width/2) / (param.map.width/2),
+            ny = (mesh.y_of_t(t) - param.map.height/2) / (param.map.height/2);
         noise0_t[t] = noise2D(nx, ny);
         noise1_t[t] = noise2D(2*nx + 5, 2*ny + 5);
         noise2_t[t] = noise2D(4*nx + 7, 4*ny + 7);
@@ -131,28 +132,28 @@ export default class Map {
         // in this thread.
         function constraintAt(x: number, y: number): number {
             // https://en.wikipedia.org/wiki/Bilinear_interpolation
-            const C = constraints.constraints, size = constraints.size;
+            const C = constraints.constraints, {width, height} = constraints.size;
             // NOTE: there's a tricky "off by one" problem here. Since
             // x can be from 0.000 to 0.999, and I want xInt+1 < size
             // to leave one extra tile for bilinear filtering, that
             // means I want xInt < size-1. So I need to multiply x and
             // y by size-1, not by size.
-            x = clamp(x * (size-1), 0, size-2);
-            y = clamp(y * (size-1), 0, size-2);
+            x = clamp(x * (width-1), 0, width-2);
+            y = clamp(y * (height-1), 0, height-2);
             let xInt = Math.floor(x),
                 yInt = Math.floor(y),
                 xFrac = x - xInt,
                 yFrac = y - yInt;
-            let p = size * yInt + xInt;
+            let p = width * yInt + xInt;
             let e00 = C[p],
             e01 = C[p + 1],
-            e10 = C[p + size],
-            e11 = C[p + size + 1];
+            e10 = C[p + width],
+            e11 = C[p + width + 1];
             return ((e00 * (1 - xFrac) + e01 * xFrac) * (1 - yFrac)
                 + (e10 * (1 - xFrac) + e11 * xFrac) * yFrac);
         }
         for (let t = 0; t < numSolidTriangles; t++) {
-            let e = constraintAt(mesh.x_of_t(t)/1000, mesh.y_of_t(t)/1000);
+            let e = constraintAt(mesh.x_of_t(t)/param.map.width, mesh.y_of_t(t)/param.map.height);
             // TODO: e*e*e*e seems too steep for this, as I want this
             // to apply mostly at the original coastlines and not
             // elsewhere

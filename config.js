@@ -11,6 +11,10 @@
 export default {
     spacing: 5.5,
     mountainSpacing: 25,
+    map: {
+        width: 2000,
+        height: 1000,
+    },
     mesh: {
         seed: 12345,
     },

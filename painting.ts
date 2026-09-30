@@ -15,15 +15,16 @@
 import {createNoise2D} from 'simplex-noise';
 import {makeRandFloat} from '@redblobgames/prng';
 
-const CANVAS_SIZE = 128;
+const CANVAS_WIDTH = 256;
+const CANVAS_HEIGHT = 128;
 
 const currentStroke = {
     /* elevation before the current paint stroke began */
-    previousElevation: new Float32Array(CANVAS_SIZE * CANVAS_SIZE),
+    previousElevation: new Float32Array(CANVAS_WIDTH * CANVAS_HEIGHT),
     /* how long, in milliseconds, was spent painting */
-    time: new Float32Array(CANVAS_SIZE * CANVAS_SIZE),
+    time: new Float32Array(CANVAS_WIDTH * CANVAS_HEIGHT),
     /* maximum strength applied */
-    strength: new Float32Array(CANVAS_SIZE * CANVAS_SIZE),
+    strength: new Float32Array(CANVAS_WIDTH * CANVAS_HEIGHT),
 };
 
 
@@ -35,7 +36,7 @@ class Generator {
     elevation: Float32Array;
     
     constructor () {
-        this.elevation = new Float32Array(CANVAS_SIZE * CANVAS_SIZE);
+        this.elevation = new Float32Array(CANVAS_WIDTH * CANVAS_HEIGHT);
     }
 
     setElevationParam(elevationParam) {
@@ -64,11 +65,11 @@ class Generator {
             return sum / sumOfAmplitudes;
         }
 
-        for (let y = 0; y < CANVAS_SIZE; y++) {
-            for (let x = 0; x < CANVAS_SIZE; x++) {
-                let p = y * CANVAS_SIZE + x;
-                let nx = 2 * x/CANVAS_SIZE - 1,
-                    ny = 2 * y/CANVAS_SIZE - 1;
+        for (let y = 0; y < CANVAS_HEIGHT; y++) {
+            for (let x = 0; x < CANVAS_WIDTH; x++) {
+                let p = y * CANVAS_WIDTH + x;
+                let nx = 2 * x/CANVAS_WIDTH - 1,
+                    ny = 2 * y/CANVAS_HEIGHT - 1;
                 let distance = Math.max(Math.abs(nx), Math.abs(ny));
             let e = 0.5 * (fbm_noise(nx, ny) + island * (0.75 - 2 * distance * distance));
             if (e < -1.0) { e = -1.0; }
@@ -95,15 +96,15 @@ class Generator {
 
         let newElevation = tool.elevation;
         let {innerRadius, outerRadius, rate} = size;
-        let xc = (x0 * CANVAS_SIZE) | 0, yc = (y0 * CANVAS_SIZE) | 0;
+        let xc = (x0 * CANVAS_WIDTH) | 0, yc = (y0 * CANVAS_HEIGHT) | 0;
         let top = Math.ceil(Math.max(0, yc - outerRadius)),
-            bottom = Math.floor(Math.min(CANVAS_SIZE-1, yc + outerRadius));
+            bottom = Math.floor(Math.min(CANVAS_HEIGHT-1, yc + outerRadius));
         for (let y = top; y <= bottom; y++) {
             let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
             let left = Math.max(0, xc - s),
-                right = Math.min(CANVAS_SIZE-1, xc + s);
+                right = Math.min(CANVAS_WIDTH-1, xc + s);
             for (let x = left; x <= right; x++) {
-                let p = y * CANVAS_SIZE + x;
+                let p = y * CANVAS_WIDTH + x;
                 let distance = Math.sqrt((x - xc) * (x - xc) + (y - yc) * (y - yc));
                 let strength = 1.0 - Math.min(1, Math.max(0, (distance - innerRadius) / (outerRadius - innerRadius)));
                 let factor = rate/1000 * deltaTimeInMs;
@@ -122,7 +123,8 @@ class Generator {
 let heightMap = new Generator();
 
 let exported = {
-    size: CANVAS_SIZE,
+    width: CANVAS_WIDTH,
+    height: CANVAS_HEIGHT,
     onUpdate: () => {},
     screenToWorldCoords: coords => coords,
     constraints: heightMap.elevation,
@@ -138,11 +140,11 @@ document.getElementById('button-reset').addEventListener('click', () => {
 
 const SIZES = {
     // rate is effect per second
-    mini:   {key: '0', rate: 10, innerRadius: 0.5, outerRadius: 0.75},
-    tiny:   {key: '1', rate: 9, innerRadius: 1.5, outerRadius: 2.5},
-    small:  {key: '2', rate: 8, innerRadius: 2, outerRadius: 6},
-    medium: {key: '3', rate: 5, innerRadius: 5, outerRadius: 10},
-    large:  {key: '4', rate: 3, innerRadius: 10, outerRadius: 16},
+    mini:   {key: '0', rate: 5, innerRadius: 0.5, outerRadius: 0.75},
+    tiny:   {key: '1', rate: 4.5, innerRadius: 1.5, outerRadius: 2.5},
+    small:  {key: '2', rate: 4, innerRadius: 2, outerRadius: 6},
+    medium: {key: '3', rate: 2.5, innerRadius: 5, outerRadius: 10},
+    large:  {key: '4', rate: 1.5, innerRadius: 10, outerRadius: 16},
 };
 
 const TOOLS = {
