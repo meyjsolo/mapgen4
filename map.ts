@@ -12,6 +12,7 @@ import FlatQueue from 'flatqueue';
 import {makeRandFloat} from '@redblobgames/prng';
 import {clamp} from "./geometry.ts";
 import param from "./config.js";
+import {TERRAIN_NONE} from "./terrains.ts";
 import type {Mesh} from "./types.d.ts";
 
 type PrecalculatedNoise = {
@@ -99,6 +100,14 @@ export default class Map {
     r_wind_order: Int32Array;
     wind_sort_r: Float32Array;
     mountain_distance_t: Float32Array;
+    terrain_t: Float32Array;
+    terrain_r: Float32Array;
+    terrainWeight_t: Float32Array;
+    terrainWeight_r: Float32Array;
+    terrainOther_t: Float32Array;
+    terrainOther_r: Float32Array;
+    terrainBlend_t: Float32Array;
+    terrainBlend_r: Float32Array;
 
     constructor (public mesh: Mesh, public t_peaks: number[], param: any) {
         this.spacing = param.spacing;
@@ -114,6 +123,143 @@ export default class Map {
         this.r_wind_order        = new Int32Array(mesh.numRegions);
         this.wind_sort_r         = new Float32Array(mesh.numRegions);
         this.mountain_distance_t = new Float32Array(mesh.numTriangles);
+        this.terrain_t           = new Float32Array(mesh.numTriangles);
+        this.terrain_r           = new Float32Array(mesh.numRegions);
+        this.terrainWeight_t     = new Float32Array(mesh.numTriangles);
+        this.terrainWeight_r     = new Float32Array(mesh.numRegions);
+        this.terrainOther_t      = new Float32Array(mesh.numTriangles);
+        this.terrainOther_r      = new Float32Array(mesh.numRegions);
+        this.terrainBlend_t      = new Float32Array(mesh.numTriangles);
+        this.terrainBlend_r      = new Float32Array(mesh.numRegions);
+    }
+
+    /**
+     * Assign the painted terrain type (e.g. snow) and a blend weight.
+     * Each region/triangle gets:
+     *  - terrain: nearest integer label (0=auto, 1=snow, 2=grass, ...)
+     *  - terrainWeight: 0..1, distance to the nearest auto (label 0)
+     *    cell, clamped. Only fades at painted→auto boundaries so painted
+     *    terrain blends into the natural biome there; painted↔painted
+     *    boundaries keep weight 1 and the vertex-shader terrain colors
+     *    interpolate directly across the edge (no biome band).
+     *
+     * The distance is computed on the constraint canvas (cheap), then
+     * weights are bilinear-sampled at each region/triangle centroid.
+     */
+    assignTerrain(terrainGrid: Float32Array, sizeW: number, sizeH: number) {
+        let {mesh, terrain_t, terrain_r, terrainWeight_t, terrainWeight_r} = this;
+        let {numSolidTriangles} = mesh;
+
+        const BLEND = 3; // transition-band radius in canvas cells
+
+        // 1. label per canvas cell (0..4)
+        const label = new Int8Array(sizeW * sizeH);
+        for (let p = 0; p < sizeW * sizeH; p++) {
+            label[p] = Math.round(terrainGrid[p] / 4);
+        }
+
+        // 2. distance to the nearest auto (label 0) cell, via multi-source
+        // BFS seeded from every auto cell and propagating through every
+        // label. Painted cells far from any auto cell keep weight 1, so
+        // painted↔painted boundaries don't fade — the vertex shader
+        // interpolates the terrain colors directly across them.
+        const dist = new Int16Array(sizeW * sizeH).fill(32767);
+        const queue = new Int32Array(sizeW * sizeH);
+        let qin = 0, qout = 0;
+        for (let p = 0; p < sizeW * sizeH; p++) {
+            if (label[p] === 0) { dist[p] = 0; queue[qin++] = p; }
+        }
+        while (qout < qin) {
+            const p = queue[qout++];
+            const x = p % sizeW, y = (p / sizeW) | 0;
+            const nd = dist[p] + 1;
+            if (y > 0)         { const q = p - sizeW; if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (y < sizeH-1)   { const q = p + sizeW; if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (x > 0)         { const q = p - 1;     if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (x < sizeW-1)   { const q = p + 1;     if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+        }
+
+        // 3. weight per canvas cell, bilinear-sampled at centroids
+        const weight = new Float32Array(sizeW * sizeH);
+        for (let p = 0; p < sizeW * sizeH; p++) {
+            weight[p] = label[p] === 0 ? 0 : Math.min(1, dist[p] / BLEND);
+        }
+
+        function sampleLabel(x: number, y: number): number {
+            x = clamp((x * sizeW) | 0, 0, sizeW - 1);
+            y = clamp((y * sizeH) | 0, 0, sizeH - 1);
+            return label[y * sizeW + x];
+        }
+        function sampleWeight(x: number, y: number): number {
+            x = clamp(x * (sizeW-1), 0, sizeW-2);
+            y = clamp(y * (sizeH-1), 0, sizeH-2);
+            let xi = Math.floor(x), yi = Math.floor(y),
+                xf = x - xi, yf = y - yi;
+            let p = sizeW * yi + xi;
+            let w00 = weight[p], w01 = weight[p + 1],
+                w10 = weight[p + sizeW], w11 = weight[p + sizeW + 1];
+            return ((w00 * (1 - xf) + w01 * xf) * (1 - yf)
+                 + (w10 * (1 - xf) + w11 * xf) * yf);
+        }
+
+        for (let t = 0; t < numSolidTriangles; t++) {
+            let x = mesh.x_of_t(t) / param.map.width, y = mesh.y_of_t(t) / param.map.height;
+            terrain_t[t] = sampleLabel(x, y);
+            terrainWeight_t[t] = sampleWeight(x, y);
+        }
+        for (let r = 0; r < mesh.numRegions; r++) {
+            if (mesh.is_ghost_r(r)) { terrain_r[r] = TERRAIN_NONE; terrainWeight_r[r] = 0; continue; }
+            let x = mesh.x_of_r(r) / param.map.width, y = mesh.y_of_r(r) / param.map.height;
+            terrain_r[r] = sampleLabel(x, y);
+            terrainWeight_r[r] = sampleWeight(x, y);
+        }
+    }
+
+    /**
+     * Sample the world-level terrain-blend field (computed once per
+     * generation round on the paint canvas by the worker, see
+     * buildTerrainField) at each region/triangle centroid.
+     *
+     * For each vertex we store:
+     *  - terrainOther: the nearest *different* painted terrain label
+     *    (0 when the vertex is auto or deep inside a single terrain)
+     *  - terrainBlend: 0..0.5 weight toward that other terrain, already
+     *    smoothstepped on the canvas. 0 far from any boundary, ~0.5 at a
+     *    boundary. The vertex shader crossfades the two terrain colors by
+     *    this factor, so the blend band is world-space wide (not one cell).
+     */
+    assignTerrainBlend(otherLabel: Int8Array, blendFactor: Float32Array, sizeW: number, sizeH: number) {
+        let {mesh, terrainOther_t, terrainOther_r, terrainBlend_t, terrainBlend_r} = this;
+        let {numSolidTriangles} = mesh;
+
+        function sampleOther(x: number, y: number): number {
+            x = clamp((x * sizeW) | 0, 0, sizeW - 1);
+            y = clamp((y * sizeH) | 0, 0, sizeH - 1);
+            return otherLabel[y * sizeW + x];
+        }
+        function sampleBlend(x: number, y: number): number {
+            x = clamp(x * (sizeW-1), 0, sizeW-2);
+            y = clamp(y * (sizeH-1), 0, sizeH-2);
+            let xi = Math.floor(x), yi = Math.floor(y),
+                xf = x - xi, yf = y - yi;
+            let p = sizeW * yi + xi;
+            let b00 = blendFactor[p], b01 = blendFactor[p + 1],
+                b10 = blendFactor[p + sizeW], b11 = blendFactor[p + sizeW + 1];
+            return ((b00 * (1 - xf) + b01 * xf) * (1 - yf)
+                 + (b10 * (1 - xf) + b11 * xf) * yf);
+        }
+
+        for (let t = 0; t < numSolidTriangles; t++) {
+            let x = mesh.x_of_t(t) / param.map.width, y = mesh.y_of_t(t) / param.map.height;
+            terrainOther_t[t] = sampleOther(x, y);
+            terrainBlend_t[t] = sampleBlend(x, y);
+        }
+        for (let r = 0; r < mesh.numRegions; r++) {
+            if (mesh.is_ghost_r(r)) { terrainOther_r[r] = 0; terrainBlend_r[r] = 0; continue; }
+            let x = mesh.x_of_r(r) / param.map.width, y = mesh.y_of_r(r) / param.map.height;
+            terrainOther_r[r] = sampleOther(x, y);
+            terrainBlend_r[r] = sampleBlend(x, y);
+        }
     }
 
     assignTriangleElevation(elevationParam: { noisy_coastlines: number; mountain_sharpness: number; hill_height: number; ocean_depth: number; },

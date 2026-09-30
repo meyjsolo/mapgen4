@@ -14,6 +14,7 @@
 
 import {createNoise2D} from 'simplex-noise';
 import {makeRandFloat} from '@redblobgames/prng';
+import {TERRAIN_NONE, TERRAIN_SNOW, TERRAIN_GRASS, TERRAIN_FOREST, TERRAIN_DESERT, TERRAIN_DIRT} from "./terrains.ts";
 
 const CANVAS_WIDTH = 256;
 const CANVAS_HEIGHT = 128;
@@ -33,10 +34,13 @@ class Generator {
     seed = 0;
     island = 0;
     userHasPainted = false;
+    terrainHasPainted = false;
     elevation: Float32Array;
+    terrain: Float32Array;
     
     constructor () {
         this.elevation = new Float32Array(CANVAS_WIDTH * CANVAS_HEIGHT);
+        this.terrain = new Float32Array(CANVAS_WIDTH * CANVAS_HEIGHT);
     }
 
     setElevationParam(elevationParam) {
@@ -79,6 +83,8 @@ class Generator {
         }
 
         this.userHasPainted = false;
+        this.terrain.fill(0);
+        this.terrainHasPainted = false;
     }
 
     /**
@@ -119,15 +125,54 @@ class Generator {
 
         this.userHasPainted = true;
     }
+
+    /**
+     * Stamp an explicit terrain type (e.g. snow) onto a disc. Painted
+     * terrain overrides the automatic biome coloring for those regions.
+     * When minElevation is given, the label is only stamped where the
+     * elevation constraint has already risen past it — used by the snow
+     * brush so the white label doesn't race ahead of the mountain relief
+     * (paintAt accumulates elevation slowly, especially on fast
+     * strokes; without the gate a quick swipe stamps full snow on flat
+     * land and renders white before any mountain has formed).
+     */
+    paintTerrainAt(terrainType: number, x0: number, y0: number, outerRadius: number, minElevation?: number) {
+        let {terrain, elevation} = this;
+        // terrain values are stored spaced apart (0=auto, 4=snow, 8=grass,
+        // 12=forest, 16=desert, 20=dirt) so bilinear sampling between two
+        // labels never lands on a third label.
+        const encoded = 4 * terrainType;
+        const gate = minElevation ?? -Infinity;
+        let xc = (x0 * CANVAS_WIDTH) | 0, yc = (y0 * CANVAS_HEIGHT) | 0;
+        let top = Math.ceil(Math.max(0, yc - outerRadius)),
+            bottom = Math.floor(Math.min(CANVAS_HEIGHT-1, yc + outerRadius));
+        for (let y = top; y <= bottom; y++) {
+            let s = Math.sqrt(outerRadius * outerRadius - (y - yc) * (y - yc)) | 0;
+            let left = Math.max(0, xc - s),
+                right = Math.min(CANVAS_WIDTH-1, xc + s);
+            for (let x = left; x <= right; x++) {
+                const p = y * CANVAS_WIDTH + x;
+                if (elevation[p] >= gate) {
+                    terrain[p] = encoded;
+                }
+            }
+        }
+
+        this.terrainHasPainted = true;
+    }
 }
 let heightMap = new Generator();
 
 const MAX_UNDO = 10;
-const undoStack: Float32Array[] = [];
-const redoStack: Float32Array[] = [];
+type Snapshot = { elevation: Float32Array; terrain: Float32Array };
+const undoStack: Snapshot[] = [];
+const redoStack: Snapshot[] = [];
 
-function pushSnapshot(stack: Float32Array[]) {
-    stack.push(Float32Array.from(heightMap.elevation));
+function pushSnapshot(stack: Snapshot[]) {
+    stack.push({
+        elevation: Float32Array.from(heightMap.elevation),
+        terrain: Float32Array.from(heightMap.terrain),
+    });
     if (stack.length > MAX_UNDO) { stack.shift(); }
 }
 
@@ -142,23 +187,31 @@ let exported = {
     onUpdate: () => {},
     screenToWorldCoords: coords => coords,
     constraints: heightMap.elevation,
+    terrain: heightMap.terrain,
     setElevationParam: elevationParam => heightMap.setElevationParam(elevationParam),
     userHasPainted: () => heightMap.userHasPainted,
+    terrainHasPainted: () => heightMap.terrainHasPainted,
     canUndo: () => undoStack.length > 0,
     canRedo: () => redoStack.length > 0,
     undo: () => {
         if (undoStack.length === 0) return;
         pushSnapshot(redoStack);
-        heightMap.elevation.set(undoStack.pop() as Float32Array);
+        const s = undoStack.pop() as Snapshot;
+        heightMap.elevation.set(s.elevation);
+        heightMap.terrain.set(s.terrain);
         heightMap.userHasPainted = undoStack.length > 0;
+        heightMap.terrainHasPainted = heightMap.terrain.some(v => v > 0);
         updateUndoRedoButtons();
         exported.onUpdate();
     },
     redo: () => {
         if (redoStack.length === 0) return;
         pushSnapshot(undoStack);
-        heightMap.elevation.set(redoStack.pop() as Float32Array);
+        const s = redoStack.pop() as Snapshot;
+        heightMap.elevation.set(s.elevation);
+        heightMap.terrain.set(s.terrain);
         heightMap.userHasPainted = true;
+        heightMap.terrainHasPainted = heightMap.terrain.some(v => v > 0);
         updateUndoRedoButtons();
         exported.onUpdate();
     },
@@ -189,6 +242,21 @@ const TOOLS = {
     valley:   {elevation: +0.05},
     mountain: {elevation: +1.0},
 };
+
+/* Terrain brushes: paint an explicit terrain type (snow, grass, ...)
+ * over the wild map, overriding the automatic biome colors. Snow also
+ * raises the elevation (like the mountain brush) so it gets real
+ * mountain relief; the others keep the land low (like the valley
+ * brush). minElevation gates the snow label so it doesn't outpace the
+ * slowly-accumulating mountain relief. */
+const TERRAIN_TOOLS = [
+    {key: 'snow',   label: 'snow',   type: TERRAIN_SNOW,   elevation: +1.0, minElevation: 0.3},
+    {key: 'grass',  label: 'grass',  type: TERRAIN_GRASS,  elevation: +0.05},
+    {key: 'forest', label: 'forest', type: TERRAIN_FOREST, elevation: +0.1},
+    {key: 'desert', label: 'desert', type: TERRAIN_DESERT, elevation: +0.05},
+    {key: 'dirt',   label: 'dirt',   type: TERRAIN_DIRT,   elevation: +0.05},
+];
+const TERRAIN_TOOL_KEYS = TERRAIN_TOOLS.map(t => t.key);
 
 let currentTool = 'mountain';
 let currentSize = 'small';
@@ -231,6 +299,11 @@ window.addEventListener('keydown', e => {
 
 for (let control of controls) {
     document.getElementById(control[1]).addEventListener('click', () => { control[2](); displayCurrentTool(); } );
+}
+
+/* terrain brush buttons (snow/grass/forest/desert/dirt) in embed.html */
+for (let t of TERRAIN_TOOLS) {
+    document.getElementById(t.key).addEventListener('click', () => { currentTool = t.key; displayCurrentTool(); } );
 }
 displayCurrentTool();
 
@@ -291,8 +364,23 @@ function setUpPaintEventHandling() {
             // Hold down shift to paint slowly
             brushSize = {...brushSize, rate: brushSize.rate/4};
         }
-        heightMap.paintAt(TOOLS[currentTool], coords[0], coords[1],
-                          brushSize, nowMs - timestamp);
+        const terrainTool = TERRAIN_TOOL_KEYS.includes(currentTool)
+            ? TERRAIN_TOOLS.find(t => t.key === currentTool) : undefined;
+        if (terrainTool) {
+            // Terrain brushes also raise/lower the elevation so the
+            // painted terrain matches the relief (snow raises it like
+            // mountains, grass/desert/dirt keep it low like valleys).
+            heightMap.paintAt({elevation: terrainTool.elevation}, coords[0], coords[1],
+                              brushSize, nowMs - timestamp);
+            heightMap.paintTerrainAt(terrainTool.type, coords[0], coords[1],
+                                     brushSize.outerRadius, terrainTool.minElevation);
+        } else {
+            // Original terrain brushes also clear any explicit terrain
+            // type (snow/grass/...) so their colors cover the painted area.
+            heightMap.paintTerrainAt(TERRAIN_NONE, coords[0], coords[1], brushSize.outerRadius);
+            heightMap.paintAt(TOOLS[currentTool], coords[0], coords[1],
+                              brushSize, nowMs - timestamp);
+        }
         timestamp = nowMs;
         exported.onUpdate();
     }

@@ -11,12 +11,12 @@
     #ui {
         display: grid;
         min-height: calc(100vmin - 130px);
-        grid-template-rows: repeat(3, 40px) max(0px, calc(min(100vmin - 140px, 50vw - 120px) - 150px));
+        grid-template-rows: repeat(6, 40px) max(0px, calc(min(100vmin - 140px, 50vw - 120px) - 300px));
         grid-template-columns: 1fr min(calc(200vmin - 280px), calc(100vw - 240px)) repeat(5, 30px) 1fr;
         grid-row-gap: 10px;
         grid-column-gap: 10px;
     }
-    #map        { grid-area: 1 / 2 / span 4 / span 1; width:100%; height:100%; display: flex; align-items: center; justify-content: center; }
+    #map        { grid-area: 1 / 2 / span 7 / span 1; width:100%; height:100%; display: flex; align-items: center; justify-content: center; }
     #mini       { grid-area: 1 / 3 / span 1 / span 1; }
     #tiny       { grid-area: 1 / 4 / span 1 / span 1; }
     #small      { grid-area: 1 / 5 / span 1 / span 1; }
@@ -26,12 +26,17 @@
     #shallow    { grid-area: 2 / 5 / span 1 / span 2; }
     #valley     { grid-area: 3 / 3 / span 1 / span 2; }
     #mountain   { grid-area: 3 / 5 / span 1 / span 2; }
-    #sliders    { grid-area: 4 / 3 / span 1 / span 5; overflow-y: scroll; overflow-x: clip; line-height: 1.1; }
+    #snow       { grid-area: 4 / 3 / span 1 / span 2; }
+    #grass      { grid-area: 4 / 5 / span 1 / span 2; }
+    #forest     { grid-area: 5 / 3 / span 1 / span 2; }
+    #desert     { grid-area: 5 / 5 / span 1 / span 2; }
+    #dirt       { grid-area: 6 / 3 / span 1 / span 2; }
+    #sliders    { grid-area: 7 / 3 / span 1 / span 5; overflow-y: scroll; overflow-x: clip; line-height: 1.1; }
 
     @media (orientation: portrait) {
         /* Put the buttons on bottom instead of on the right */
         #ui {
-            grid-template-rows: calc(100vmin) repeat(5, 40px) 1fr;
+            grid-template-rows: calc(100vmin) repeat(9, 40px) 1fr;
             grid-template-columns: 70px 70px calc(100vmin - 50px - 140px - 40px);
         }
         #map { grid-area: 1 / 1 / span 1 / span 6; }
@@ -44,7 +49,12 @@
         #shallow { grid-area: 3 / 2 / span 1 / span 1; }
         #valley { grid-area: 4 / 2 / span 1 / span 1; }
         #mountain { grid-area: 5 / 2 / span 1 / span 1; }
-        #sliders { grid-area: 2 / 3 / span 6 / span 1; justify-self: end; width: 100%; column-width: 20ch; }
+        #snow { grid-area: 6 / 2 / span 1 / span 1; }
+        #grass { grid-area: 7 / 2 / span 1 / span 1; }
+        #forest { grid-area: 8 / 2 / span 1 / span 1; }
+        #desert { grid-area: 9 / 2 / span 1 / span 1; }
+        #dirt { grid-area: 10 / 2 / span 1 / span 1; }
+        #sliders { grid-area: 2 / 3 / span 9 / span 1; justify-self: end; width: 100%; column-width: 20ch; }
     }
 
     #mapgen4 { display: block; width: 100%; height: auto; aspect-ratio: 2 / 1; cursor: crosshair; }
@@ -86,8 +96,13 @@
   
   <button id="ocean" title="Ocean"><svg viewBox="-50 -50 100 100"><text y="45">Ocean</text><path d="M -50,-30 q 25,-20 50,0 q 25,20 50,0 l 0,50 l -100,0 z" fill="hsl(240,50%,40%)"/></svg></button>
   <button id="shallow" title="Water"><svg viewBox="-50 -50 100 100"><text y="45">Water</text><path d="M -50,-20 q 15,20 30,0 q 20,20 40,0 q 15,20 30,0 l 0,40 l -100,0 z" fill="hsl(200,50%,70%)"/></svg></button>
+  <button id="snow" title="Snow"><svg viewBox="-50 -50 100 100"><text y="45">Snow</text><path d="M -50,20 l 25,-45 l 25,45 z" fill="hsl(210,30%,92%)"/></svg></button>
+  <button id="grass" title="Grass"><svg viewBox="-50 -50 100 100"><text y="45">Grass</text><path d="M -50,-20 q 25,20 50,0 q 25,20 50,0 l 0,40 l -100,0 z" fill="hsl(110,40%,55%)"/></svg></button>
+  <button id="forest" title="Forest"><svg viewBox="-50 -50 100 100"><text y="45">Forest</text><path d="M 0,-42 l -30,32 l 60,0 z" fill="hsl(120,35%,28%)"/><rect x="-4" y="12" width="8" height="26" fill="hsl(30,30%,30%)"/></svg></button>
   <button id="valley" title="Valley"><svg viewBox="-50 -50 100 100"><text y="45">Valley</text><path d="M -50,-20 c 20,10 80,10 100,0 l 0,40 l -100,0 z" fill="hsl(100,40%,60%)"/></svg></button>
   <button id="mountain" title="Mountain"><svg viewBox="-50 -50 100 100"><text y="45">Mountains</text><g fill="hsl(60,50%,40%)" stroke="white" stroke-width="2"><path d="M -30,20 l 30,-60 l 30,60 z"/><path d="M -50,20 l 20,-40 l 20,40 z"/><path d="M 10,20 l 15,-30 l 15,30 z"/></g></svg></button>
+  <button id="desert" title="Desert"><svg viewBox="-50 -50 100 100"><text y="45">Desert</text><path d="M -50,-30 q 25,-10 50,0 q 25,10 50,0 l 0,50 l -100,0 z" fill="hsl(40,45%,52%)"/></svg></button>
+  <button id="dirt" title="Dirt"><svg viewBox="-50 -50 100 100"><text y="45">Dirt</text><path d="M -50,-20 c 20,10 80,10 100,0 l 0,40 l -100,0 z" fill="hsl(30,45%,25%)"/></svg></button>
 
   <div id="sliders">
     <button id="button-undo">Undo</button>

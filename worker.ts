@@ -11,6 +11,76 @@ import Map      from "./map.ts";
 import Geometry from "./geometry.ts";
 import type {Mesh} from "./types.d.ts";
 
+// Terrain boundary blend field
+//
+// A world-level field on the paint canvas: for each canvas cell we find
+// the nearest *different* painted terrain label and its distance, then
+// turn the distance into a smoothstepped blend weight (0 far from any
+// boundary, ~0.5 at a boundary). Vertices bilinearly-sample this
+// (Map.assignTerrainBlend) so adjacent painted terrains crossfade over
+// a world-space band instead of a one-cell hard edge. All-zero when
+// blendWidth <= 0 or blending is disabled.
+
+function buildTerrainField(terrainGrid: Float32Array, sizeW: number, sizeH: number, worldWidth: number, blendWidth: number, enabled: boolean): {otherLabel: Int8Array, blendFactor: Float32Array} {
+    const N = sizeW * sizeH;
+    const otherLabel = new Int8Array(N);
+    const blendFactor = new Float32Array(N);
+
+    if (!enabled || blendWidth <= 0) {
+        return {otherLabel, blendFactor};
+    }
+
+    // label per canvas cell, matching Map.assignTerrain (round(grid/4))
+    const label = new Int8Array(N);
+    for (let p = 0; p < N; p++) {
+        label[p] = Math.round(terrainGrid[p] / 4);
+    }
+
+    // world units per canvas cell (paint canvas matches the world aspect)
+    const cellW = worldWidth / sizeW;
+    const blendCells = blendWidth / cellW;
+
+    // For each painted label (1..5), multi-source BFS its distance to every
+    // cell; merge into each cell's nearest *foreign* label.
+    const dist = new Int16Array(N);
+    const queue = new Int32Array(N);
+    const bestDist = new Int16Array(N).fill(32767);
+    const bestOther = new Int8Array(N);
+
+    for (let L = 1; L <= 5; L++) {
+        dist.fill(32767);
+        let qin = 0, qout = 0;
+        for (let p = 0; p < N; p++) {
+            if (label[p] === L) { dist[p] = 0; queue[qin++] = p; }
+        }
+        while (qout < qin) {
+            const p = queue[qout++];
+            const x = p % sizeW, y = (p / sizeW) | 0;
+            const nd = dist[p] + 1;
+            if (y > 0)       { const q = p - sizeW; if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (y < sizeH-1) { const q = p + sizeW; if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (x > 0)       { const q = p - 1;     if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (x < sizeW-1) { const q = p + 1;     if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+        }
+        for (let p = 0; p < N; p++) {
+            if (label[p] === L || label[p] === 0) continue; // own or auto: no foreign blend
+            if (dist[p] < bestDist[p]) { bestDist[p] = dist[p]; bestOther[p] = L; }
+        }
+    }
+
+    // smoothstep the distance into a symmetric 0..0.5 blend weight: 0.5 at
+    // a boundary (dist 0), 0 once dist >= blendCells (blendWidth in world).
+    for (let p = 0; p < N; p++) {
+        if (label[p] === 0 || bestOther[p] === 0) { blendFactor[p] = 0; continue; }
+        let t = bestDist[p] / blendCells;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        t = t * t * (3 - 2 * t);
+        blendFactor[p] = 0.5 * (1 - t);
+    }
+
+    return {otherLabel: bestOther, blendFactor};
+}
+
 // NOTE: Typescript workaround https://github.com/Microsoft/TypeScript/issues/20595
 const worker: Worker = self as any;
 
@@ -46,6 +116,12 @@ let handler = (event) => {
         
         if (run.biomes) {
             map.assignElevation(param.elevation, constraints);
+            const terrainBlend = buildTerrainField(
+                constraints.terrain, constraints.size.width, constraints.size.height,
+                param.map.width, param.terrain?.blendWidth ?? 0, param.terrain?.blendEnabled ?? true);
+            map.assignTerrain(constraints.terrain, constraints.size.width, constraints.size.height);
+            map.assignTerrainBlend(terrainBlend.otherLabel, terrainBlend.blendFactor,
+                                   constraints.size.width, constraints.size.height);
             map.assignRainfall(param.biomes);
         }
         if (run.rivers) {
