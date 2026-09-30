@@ -13,6 +13,7 @@ import {makeRandFloat} from '@redblobgames/prng';
 import {clamp} from "./geometry.ts";
 import param from "./config.js";
 import {TERRAIN_NONE} from "./terrains.ts";
+import {NUM_COUNTRIES} from "./countries.ts";
 import type {Mesh} from "./types.d.ts";
 
 type PrecalculatedNoise = {
@@ -108,6 +109,8 @@ export default class Map {
     terrainOther_r: Float32Array;
     terrainBlend_t: Float32Array;
     terrainBlend_r: Float32Array;
+    country_t: Int8Array;
+    country_r: Int8Array;
 
     constructor (public mesh: Mesh, public t_peaks: number[], param: any) {
         this.spacing = param.spacing;
@@ -131,6 +134,42 @@ export default class Map {
         this.terrainOther_r      = new Float32Array(mesh.numRegions);
         this.terrainBlend_t      = new Float32Array(mesh.numTriangles);
         this.terrainBlend_r      = new Float32Array(mesh.numRegions);
+        this.country_t           = new Int8Array(mesh.numTriangles);
+        this.country_r           = new Int8Array(mesh.numRegions);
+    }
+
+    /**
+     * Assign countries from the painted low-res constraint canvas.
+     * Each solid triangle samples the country grid at its centroid;
+     * each region takes the majority vote of the triangles around it.
+     */
+    assignCountries(countryGrid: Float32Array, sizeW: number, sizeH: number) {
+        let {mesh, country_t, country_r} = this;
+        let {numSolidTriangles} = mesh;
+        for (let t = 0; t < numSolidTriangles; t++) {
+            let x = mesh.x_of_t(t) / param.map.width, y = mesh.y_of_t(t) / param.map.height;
+            let xi = clamp((x * sizeW) | 0, 0, sizeW-1),
+                yi = clamp((y * sizeH) | 0, 0, sizeH-1);
+            country_t[t] = countryGrid[yi * sizeW + xi];
+        }
+
+        let votes = new Int32Array(NUM_COUNTRIES);
+        const t_around_r: number[] = [];
+        for (let r = 0; r < mesh.numRegions; r++) {
+            country_r[r] = -1;
+            if (mesh.is_ghost_r(r)) continue;
+            votes.fill(0);
+            mesh.t_around_r(r, t_around_r);
+            let best = -1, bestCount = 0;
+            for (let t of t_around_r) {
+                if (t >= numSolidTriangles) continue; // ghost triangles have unassigned country 0
+                let c = country_t[t];
+                if (c < 0 || c >= NUM_COUNTRIES) continue;
+                let count = ++votes[c];
+                if (count > bestCount) { bestCount = count; best = c; }
+            }
+            country_r[r] = best;
+        }
     }
 
     /**

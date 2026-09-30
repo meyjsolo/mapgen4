@@ -109,13 +109,15 @@ let handler = (event) => {
     
     // This handler is for all subsequent messages
     handler = (event) => {
-        let {param, constraints, quad_elements_buffer, a_quad_em_buffer, a_river_xyww_buffer} = event.data;
+        let {param, constraints, quad_elements_buffer, a_quad_em_buffer, a_river_xyww_buffer, a_border_xy_buffer} = event.data;
 
         let numRiverTriangles = 0;
+        let numBorderSegments = 0;
         let start_time = performance.now();
         
         if (run.biomes) {
             map.assignElevation(param.elevation, constraints);
+            map.assignCountries(constraints.country, constraints.size.width, constraints.size.height);
             const terrainBlend = buildTerrainField(
                 constraints.terrain, constraints.size.width, constraints.size.height,
                 param.map.width, param.terrain?.blendWidth ?? 0, param.terrain?.blendEnabled ?? true);
@@ -128,7 +130,10 @@ let handler = (event) => {
             map.assignRivers(param.rivers);
         }
         if (run.biomes || run.rivers) {
-            Geometry.setMapGeometry(map, param.elevation.mountain_folds, new Int32Array(quad_elements_buffer), new Float32Array(a_quad_em_buffer));
+            const quad_em = new Float32Array(a_quad_em_buffer);
+            Geometry.setMapGeometry(map, param.elevation.mountain_folds, new Int32Array(quad_elements_buffer), quad_em);
+            const a_border_xy = new Float32Array(a_border_xy_buffer);
+            numBorderSegments = Geometry.setBorderGeometry(mesh, quad_em, a_border_xy);
         }
         if (run.rivers) {
             numRiverTriangles = Geometry.setRiverGeometry(map, param.spacing, param.rivers, new Float32Array(a_river_xyww_buffer));
@@ -138,14 +143,17 @@ let handler = (event) => {
         worker.postMessage(
             {elapsed,
              numRiverTriangles,
+             numBorderSegments,
              quad_elements_buffer,
              a_quad_em_buffer,
              a_river_xyww_buffer,
+             a_border_xy_buffer,
             },
             [
                 quad_elements_buffer,
                 a_quad_em_buffer,
                 a_river_xyww_buffer,
+                a_border_xy_buffer,
             ]
         );
     };
