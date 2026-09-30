@@ -160,6 +160,13 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
         generate();
     };
 
+    /* Reset clears the city markers from the map but keeps the entries
+     * in the city panel (they become "unplaced" again). */
+    Painting.onReset = () => {
+        for (const c of cityManager.getCities()) { c.placed = false; }
+        cityUI.rebuild();
+    };
+
     const worker = new window.Worker("build/_worker.js");
     let working = false;
     let workRequested = false;
