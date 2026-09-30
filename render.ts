@@ -565,6 +565,7 @@ const fbo_texture_height: number = fbo_texture_width * (param.map.height/param.m
 
 export default class Renderer {
     numRiverTriangles: number = 0;
+    cityUI: any = null;
 
     topdown: mat4;
     projection: mat4;
@@ -752,6 +753,15 @@ export default class Renderer {
         /* it returns vec4 but we only need vec2; they're compatible */
         let transformed = vec4.transformMat4(vec4.create(), glCoords, this.inverse_projection);
         return [transformed[0], transformed[1]];
+    }
+
+    /* Convert a world position to normalized [0,1] screen coordinates
+     * within the map viewport (y down), using the current projection.
+     * Used by the city marker overlay. */
+    worldToScreen(x: number, y: number): [number, number] {
+        const v = vec4.create();
+        vec4.transformMat4(v, vec4.fromValues(x, y, 0, 1), this.projection);
+        return [(v[0] + 1) / 2, (1 - v[1]) / 2];
     }
 
     /* Update the buffers with the latest map data */
@@ -1002,6 +1012,9 @@ export default class Renderer {
             this.drawFinal([0.5 / fbo_texture_width, 0.5 / fbo_texture_height]);
 
             this.updateLabelPositions();
+
+            /* city markers overlay follows the projection (set by mapgen4) */
+            if (this.cityUI) this.cityUI.updatePositions();
 
             if (this.screenshotCallback) {
                 const ctx = this.screenshotCanvas.getContext('2d');
