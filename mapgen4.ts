@@ -17,6 +17,8 @@ import param from "./config.js";
 import {makeMesh} from "./mesh.ts";
 import Painting from "./painting.ts";
 import Renderer from "./render.ts";
+import {CityManager} from "./cities.ts";
+import CityUI from "./city-ui.ts";
 import type {Mesh} from "./types.d.ts";
 
 
@@ -73,6 +75,9 @@ const initialParams = {
  */
 function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
     let render = new Renderer(mesh);
+    const cityManager = new CityManager();
+    const cityUI = new CityUI(render, cityManager);
+    render.cityUI = cityUI;
 
     /* set initial parameters */
     for (let phase of ['elevation', 'biomes', 'rivers', 'render']) {

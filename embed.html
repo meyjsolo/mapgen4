@@ -94,6 +94,48 @@
         width: 100%;
         height: 2em;
     }
+
+    /* ---- city markers ---- */
+    #city-markers { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
+    .city-marker,
+    .city-label { position: absolute; pointer-events: auto; touch-action: none; border: none; background: none; padding: 0; margin: 0; cursor: pointer; font-family: var(--sans-serif, sans-serif); }
+    .city-marker { width: 16px; height: 16px; margin-left: -8px; margin-top: -8px; border-radius: 50%; background: #ff4d4d; border: 2px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.7); box-sizing: border-box; }
+    .city-marker.selected { background: #1a73e8; box-shadow: 0 0 0 4px rgba(26,115,232,.4); transform: scale(1.2); }
+    .city-label { transform: translate(-50%, -230%); background: rgba(0,0,0,.62); color: #fff; padding: 1px 6px; border-radius: 3px; font-size: 13px; line-height: 1.3; white-space: nowrap; text-align: center; }
+    .city-label.selected { background: #1a73e8; box-shadow: 0 0 0 2px rgba(26,115,232,.5); }
+
+    /* ---- city edit panel (right side) ---- */
+    #city-panel { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+    .city-panel-title { font-size: 13px; font-weight: bold; color: #444; }
+    .city-create-btn { width: 100%; padding: 6px 0; border: 1px solid #bbb; font-size: 13px; font-family: var(--sans-serif, sans-serif); }
+    .city-create-btn:hover { background: #e8f0fe; }
+    .city-list { display: flex; flex-direction: column; gap: 4px; }
+    .city-item { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: grab; touch-action: none; user-select: none; font-size: 13px; }
+    .city-item:hover { background: #e8f0fe; }
+    .city-item.unplaced { border-style: dashed; color: #777; }
+    .city-item-dot { flex: 0 0 auto; width: 12px; height: 12px; border-radius: 50%; background: #ff4d4d; border: 2px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.7); box-sizing: border-box; }
+    .city-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .city-item-hint { flex: 0 0 auto; font-size: 10px; color: #999; }
+    .city-drag-ghost { position: fixed; z-index: 40; transform: translate(-50%, -50%); pointer-events: none; display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: rgba(255,255,255,.9); border: 1px solid #1a73e8; border-radius: 6px; font-size: 13px; font-family: var(--sans-serif, sans-serif); opacity: .85; }
+
+    /* ---- city context menu ---- */
+    .city-menu { position: fixed; z-index: 20; background: #fff; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,.25); padding: 4px 0; min-width: 120px; }
+    .city-menu button { display: block; width: 100%; text-align: left; padding: 8px 14px; border: none; background: none; cursor: pointer; font-size: 14px; font-family: var(--sans-serif, sans-serif); }
+    .city-menu button:hover { background: #e8f0fe; }
+
+    /* ---- city dialogs ---- */
+    .city-dialog-modal { position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.35); display: flex; align-items: center; justify-content: center; }
+    .city-dialog-card { background: #fff; border-radius: 10px; padding: 18px; width: 320px; max-width: 90vw; box-shadow: 0 8px 30px rgba(0,0,0,.3); box-sizing: border-box; }
+    .city-dialog-card h3 { margin: 0 0 12px; font-size: 16px; font-family: var(--sans-serif, sans-serif); }
+    .city-dialog-card label { display: block; font-size: 13px; margin: 0 0 6px; font-family: var(--sans-serif, sans-serif); }
+    .city-dialog-card input { width: 100%; box-sizing: border-box; padding: 8px; font-size: 14px; border: 1px solid #bbb; border-radius: 6px; }
+    .city-dialog-card input:focus { outline: 2px solid #1a73e8; border-color: #1a73e8; }
+    .city-dialog-body { font-size: 14px; margin: 8px 0 0; font-family: var(--sans-serif, sans-serif); }
+    .city-error { color: #e53935; font-size: 12px; min-height: 16px; margin-top: 6px; font-family: var(--sans-serif, sans-serif); }
+    .city-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .city-dialog-actions button { padding: 7px 16px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; font-size: 14px; font-family: var(--sans-serif, sans-serif); }
+    .city-dialog-actions button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+    .city-dialog-actions button.danger { background: #e53935; color: #fff; border-color: #e53935; }
 </style>
 
   <div id="ui">
@@ -118,6 +160,7 @@
     <div id="countries">
       <span class="country-label">countries</span>
     </div>
+    <div id="city-panel"></div>
     <button id="button-undo">Undo</button>
     <button id="button-redo">Redo</button>
     <button id="button-reset">Reset</button>
