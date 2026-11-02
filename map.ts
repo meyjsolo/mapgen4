@@ -11,6 +11,9 @@ import {createNoise2D} from 'simplex-noise';
 import FlatQueue from 'flatqueue';
 import {makeRandFloat} from '@redblobgames/prng';
 import {clamp} from "./geometry.ts";
+import param from "./config.js";
+import {TERRAIN_NONE} from "./terrains.ts";
+import {NUM_COUNTRIES} from "./countries.ts";
 import type {Mesh} from "./types.d.ts";
 
 type PrecalculatedNoise = {
@@ -67,8 +70,8 @@ function precalculateNoise(randFloat: () => number, mesh: Mesh): PrecalculatedNo
         noise5_t = new Float32Array(numTriangles),
         noise6_t = new Float32Array(numTriangles);
     for (let t = 0; t < numTriangles; t++) {
-        let nx = (mesh.x_of_t(t)-500) / 500,
-            ny = (mesh.y_of_t(t)-500) / 500;
+        let nx = (mesh.x_of_t(t) - param.map.width/2) / (param.map.width/2),
+            ny = (mesh.y_of_t(t) - param.map.height/2) / (param.map.height/2);
         noise0_t[t] = noise2D(nx, ny);
         noise1_t[t] = noise2D(2*nx + 5, 2*ny + 5);
         noise2_t[t] = noise2D(4*nx + 7, 4*ny + 7);
@@ -98,6 +101,16 @@ export default class Map {
     r_wind_order: Int32Array;
     wind_sort_r: Float32Array;
     mountain_distance_t: Float32Array;
+    terrain_t: Float32Array;
+    terrain_r: Float32Array;
+    terrainWeight_t: Float32Array;
+    terrainWeight_r: Float32Array;
+    terrainOther_t: Float32Array;
+    terrainOther_r: Float32Array;
+    terrainBlend_t: Float32Array;
+    terrainBlend_r: Float32Array;
+    country_t: Int8Array;
+    country_r: Int8Array;
 
     constructor (public mesh: Mesh, public t_peaks: number[], param: any) {
         this.spacing = param.spacing;
@@ -113,6 +126,179 @@ export default class Map {
         this.r_wind_order        = new Int32Array(mesh.numRegions);
         this.wind_sort_r         = new Float32Array(mesh.numRegions);
         this.mountain_distance_t = new Float32Array(mesh.numTriangles);
+        this.terrain_t           = new Float32Array(mesh.numTriangles);
+        this.terrain_r           = new Float32Array(mesh.numRegions);
+        this.terrainWeight_t     = new Float32Array(mesh.numTriangles);
+        this.terrainWeight_r     = new Float32Array(mesh.numRegions);
+        this.terrainOther_t      = new Float32Array(mesh.numTriangles);
+        this.terrainOther_r      = new Float32Array(mesh.numRegions);
+        this.terrainBlend_t      = new Float32Array(mesh.numTriangles);
+        this.terrainBlend_r      = new Float32Array(mesh.numRegions);
+        this.country_t           = new Int8Array(mesh.numTriangles);
+        this.country_r           = new Int8Array(mesh.numRegions);
+    }
+
+    /**
+     * Assign countries from the painted low-res constraint canvas.
+     * Each solid triangle samples the country grid at its centroid;
+     * each region takes the majority vote of the triangles around it.
+     */
+    assignCountries(countryGrid: Float32Array, sizeW: number, sizeH: number) {
+        let {mesh, country_t, country_r} = this;
+        let {numSolidTriangles} = mesh;
+        for (let t = 0; t < numSolidTriangles; t++) {
+            let x = mesh.x_of_t(t) / param.map.width, y = mesh.y_of_t(t) / param.map.height;
+            let xi = clamp((x * sizeW) | 0, 0, sizeW-1),
+                yi = clamp((y * sizeH) | 0, 0, sizeH-1);
+            country_t[t] = countryGrid[yi * sizeW + xi];
+        }
+
+        let votes = new Int32Array(NUM_COUNTRIES);
+        const t_around_r: number[] = [];
+        for (let r = 0; r < mesh.numRegions; r++) {
+            country_r[r] = -1;
+            if (mesh.is_ghost_r(r)) continue;
+            votes.fill(0);
+            mesh.t_around_r(r, t_around_r);
+            let best = -1, bestCount = 0;
+            for (let t of t_around_r) {
+                if (t >= numSolidTriangles) continue; // ghost triangles have unassigned country 0
+                let c = country_t[t];
+                if (c < 0 || c >= NUM_COUNTRIES) continue;
+                let count = ++votes[c];
+                if (count > bestCount) { bestCount = count; best = c; }
+            }
+            country_r[r] = best;
+        }
+    }
+
+    /**
+     * Assign the painted terrain type (e.g. snow) and a blend weight.
+     * Each region/triangle gets:
+     *  - terrain: nearest integer label (0=auto, 1=snow, 2=grass, ...)
+     *  - terrainWeight: 0..1, distance to the nearest auto (label 0)
+     *    cell, clamped. Only fades at painted→auto boundaries so painted
+     *    terrain blends into the natural biome there; painted↔painted
+     *    boundaries keep weight 1 and the vertex-shader terrain colors
+     *    interpolate directly across the edge (no biome band).
+     *
+     * The distance is computed on the constraint canvas (cheap), then
+     * weights are bilinear-sampled at each region/triangle centroid.
+     */
+    assignTerrain(terrainGrid: Float32Array, sizeW: number, sizeH: number) {
+        let {mesh, terrain_t, terrain_r, terrainWeight_t, terrainWeight_r} = this;
+        let {numSolidTriangles} = mesh;
+
+        const BLEND = 3; // transition-band radius in canvas cells
+
+        // 1. label per canvas cell (0..4)
+        const label = new Int8Array(sizeW * sizeH);
+        for (let p = 0; p < sizeW * sizeH; p++) {
+            label[p] = Math.round(terrainGrid[p] / 4);
+        }
+
+        // 2. distance to the nearest auto (label 0) cell, via multi-source
+        // BFS seeded from every auto cell and propagating through every
+        // label. Painted cells far from any auto cell keep weight 1, so
+        // painted↔painted boundaries don't fade — the vertex shader
+        // interpolates the terrain colors directly across them.
+        const dist = new Int16Array(sizeW * sizeH).fill(32767);
+        const queue = new Int32Array(sizeW * sizeH);
+        let qin = 0, qout = 0;
+        for (let p = 0; p < sizeW * sizeH; p++) {
+            if (label[p] === 0) { dist[p] = 0; queue[qin++] = p; }
+        }
+        while (qout < qin) {
+            const p = queue[qout++];
+            const x = p % sizeW, y = (p / sizeW) | 0;
+            const nd = dist[p] + 1;
+            if (y > 0)         { const q = p - sizeW; if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (y < sizeH-1)   { const q = p + sizeW; if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (x > 0)         { const q = p - 1;     if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+            if (x < sizeW-1)   { const q = p + 1;     if (dist[q] > nd) { dist[q] = nd; queue[qin++] = q; } }
+        }
+
+        // 3. weight per canvas cell, bilinear-sampled at centroids
+        const weight = new Float32Array(sizeW * sizeH);
+        for (let p = 0; p < sizeW * sizeH; p++) {
+            weight[p] = label[p] === 0 ? 0 : Math.min(1, dist[p] / BLEND);
+        }
+
+        function sampleLabel(x: number, y: number): number {
+            x = clamp((x * sizeW) | 0, 0, sizeW - 1);
+            y = clamp((y * sizeH) | 0, 0, sizeH - 1);
+            return label[y * sizeW + x];
+        }
+        function sampleWeight(x: number, y: number): number {
+            x = clamp(x * (sizeW-1), 0, sizeW-2);
+            y = clamp(y * (sizeH-1), 0, sizeH-2);
+            let xi = Math.floor(x), yi = Math.floor(y),
+                xf = x - xi, yf = y - yi;
+            let p = sizeW * yi + xi;
+            let w00 = weight[p], w01 = weight[p + 1],
+                w10 = weight[p + sizeW], w11 = weight[p + sizeW + 1];
+            return ((w00 * (1 - xf) + w01 * xf) * (1 - yf)
+                 + (w10 * (1 - xf) + w11 * xf) * yf);
+        }
+
+        for (let t = 0; t < numSolidTriangles; t++) {
+            let x = mesh.x_of_t(t) / param.map.width, y = mesh.y_of_t(t) / param.map.height;
+            terrain_t[t] = sampleLabel(x, y);
+            terrainWeight_t[t] = sampleWeight(x, y);
+        }
+        for (let r = 0; r < mesh.numRegions; r++) {
+            if (mesh.is_ghost_r(r)) { terrain_r[r] = TERRAIN_NONE; terrainWeight_r[r] = 0; continue; }
+            let x = mesh.x_of_r(r) / param.map.width, y = mesh.y_of_r(r) / param.map.height;
+            terrain_r[r] = sampleLabel(x, y);
+            terrainWeight_r[r] = sampleWeight(x, y);
+        }
+    }
+
+    /**
+     * Sample the world-level terrain-blend field (computed once per
+     * generation round on the paint canvas by the worker, see
+     * buildTerrainField) at each region/triangle centroid.
+     *
+     * For each vertex we store:
+     *  - terrainOther: the nearest *different* painted terrain label
+     *    (0 when the vertex is auto or deep inside a single terrain)
+     *  - terrainBlend: 0..0.5 weight toward that other terrain, already
+     *    smoothstepped on the canvas. 0 far from any boundary, ~0.5 at a
+     *    boundary. The vertex shader crossfades the two terrain colors by
+     *    this factor, so the blend band is world-space wide (not one cell).
+     */
+    assignTerrainBlend(otherLabel: Int8Array, blendFactor: Float32Array, sizeW: number, sizeH: number) {
+        let {mesh, terrainOther_t, terrainOther_r, terrainBlend_t, terrainBlend_r} = this;
+        let {numSolidTriangles} = mesh;
+
+        function sampleOther(x: number, y: number): number {
+            x = clamp((x * sizeW) | 0, 0, sizeW - 1);
+            y = clamp((y * sizeH) | 0, 0, sizeH - 1);
+            return otherLabel[y * sizeW + x];
+        }
+        function sampleBlend(x: number, y: number): number {
+            x = clamp(x * (sizeW-1), 0, sizeW-2);
+            y = clamp(y * (sizeH-1), 0, sizeH-2);
+            let xi = Math.floor(x), yi = Math.floor(y),
+                xf = x - xi, yf = y - yi;
+            let p = sizeW * yi + xi;
+            let b00 = blendFactor[p], b01 = blendFactor[p + 1],
+                b10 = blendFactor[p + sizeW], b11 = blendFactor[p + sizeW + 1];
+            return ((b00 * (1 - xf) + b01 * xf) * (1 - yf)
+                 + (b10 * (1 - xf) + b11 * xf) * yf);
+        }
+
+        for (let t = 0; t < numSolidTriangles; t++) {
+            let x = mesh.x_of_t(t) / param.map.width, y = mesh.y_of_t(t) / param.map.height;
+            terrainOther_t[t] = sampleOther(x, y);
+            terrainBlend_t[t] = sampleBlend(x, y);
+        }
+        for (let r = 0; r < mesh.numRegions; r++) {
+            if (mesh.is_ghost_r(r)) { terrainOther_r[r] = 0; terrainBlend_r[r] = 0; continue; }
+            let x = mesh.x_of_r(r) / param.map.width, y = mesh.y_of_r(r) / param.map.height;
+            terrainOther_r[r] = sampleOther(x, y);
+            terrainBlend_r[r] = sampleBlend(x, y);
+        }
     }
 
     assignTriangleElevation(elevationParam: { noisy_coastlines: number; mountain_sharpness: number; hill_height: number; ocean_depth: number; },
@@ -131,28 +317,28 @@ export default class Map {
         // in this thread.
         function constraintAt(x: number, y: number): number {
             // https://en.wikipedia.org/wiki/Bilinear_interpolation
-            const C = constraints.constraints, size = constraints.size;
+            const C = constraints.constraints, {width, height} = constraints.size;
             // NOTE: there's a tricky "off by one" problem here. Since
             // x can be from 0.000 to 0.999, and I want xInt+1 < size
             // to leave one extra tile for bilinear filtering, that
             // means I want xInt < size-1. So I need to multiply x and
             // y by size-1, not by size.
-            x = clamp(x * (size-1), 0, size-2);
-            y = clamp(y * (size-1), 0, size-2);
+            x = clamp(x * (width-1), 0, width-2);
+            y = clamp(y * (height-1), 0, height-2);
             let xInt = Math.floor(x),
                 yInt = Math.floor(y),
                 xFrac = x - xInt,
                 yFrac = y - yInt;
-            let p = size * yInt + xInt;
+            let p = width * yInt + xInt;
             let e00 = C[p],
             e01 = C[p + 1],
-            e10 = C[p + size],
-            e11 = C[p + size + 1];
+            e10 = C[p + width],
+            e11 = C[p + width + 1];
             return ((e00 * (1 - xFrac) + e01 * xFrac) * (1 - yFrac)
                 + (e10 * (1 - xFrac) + e11 * xFrac) * yFrac);
         }
         for (let t = 0; t < numSolidTriangles; t++) {
-            let e = constraintAt(mesh.x_of_t(t)/1000, mesh.y_of_t(t)/1000);
+            let e = constraintAt(mesh.x_of_t(t)/param.map.width, mesh.y_of_t(t)/param.map.height);
             // TODO: e*e*e*e seems too steep for this, as I want this
             // to apply mostly at the original coastlines and not
             // elsewhere

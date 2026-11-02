@@ -12,6 +12,7 @@
 import Poisson from 'fast-2d-poisson-disk-sampling';
 import {makeRandFloat} from '@redblobgames/prng';
 import {generateInteriorBoundaryPoints, generateExteriorBoundaryPoints} from "./dual-mesh/create.ts";
+import param from "./config.js";
 
 export type Point = [number, number];
 export type PointsData = {
@@ -40,7 +41,7 @@ export function choosePoints(seed: number, spacing: number, mountainSpacing: num
     // Generate both interior and exterior boundary points; see
     // https://www.redblobgames.com/x/2314-poisson-with-boundary/
     const boundarySpacing = spacing * Math.sqrt(2);
-    const bounds = {left: 0, top: 0, width: 1000, height: 1000}; // left,top must be 0 for poisson
+    const bounds = {left: 0, top: 0, width: param.map.width, height: param.map.height}; // left,top must be 0 for poisson
     let interiorBoundaryPoints = generateInteriorBoundaryPoints(bounds, boundarySpacing);
     let exteriorBoundaryPoints = generateExteriorBoundaryPoints(bounds, boundarySpacing);
     

@@ -17,6 +17,8 @@ import param from "./config.js";
 import {makeMesh} from "./mesh.ts";
 import Painting from "./painting.ts";
 import Renderer from "./render.ts";
+import {CityManager} from "./cities.ts";
+import CityUI from "./city-ui.ts";
 import type {Mesh} from "./types.d.ts";
 
 
@@ -46,8 +48,8 @@ const initialParams = {
     ],
     render: [
         ['zoom', 100/480, 100/1000, 100/50],
-        ['x', 500, 0, 1000],
-        ['y', 500, 0, 1000],
+        ['x', param.map.width/2, 0, param.map.width],
+        ['y', param.map.height/2, 0, param.map.height],
         ['light_angle_deg', 80, 0, 360],
         ['slope', 2, 0, 5],
         ['flat', 2.5, 0, 5],
@@ -55,13 +57,15 @@ const initialParams = {
         ['overhead', 30, 0, 60],
         ['tilt_deg', 0, 0, 90],
         ['rotate_deg', 0, -180, 180],
-        ['mountain_height', 50, 0, 250],
+        ['mountain_height', 80, 0, 250],
         ['outline_depth', 1, 0, 2],
         ['outline_strength', 15, 0, 30],
         ['outline_threshold', 0, 0, 100],
         ['outline_coast', 0, 0, 1],
         ['outline_water', 13.0, 0, 20], // things start going wrong when this is high
         ['biome_colors', 1, 0, 1],
+        ['country_strength', 0.5, 0, 1],
+        ['country_borders', 1.0, 0, 1],
     ],
 };
 
@@ -71,6 +75,9 @@ const initialParams = {
  */
 function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
     let render = new Renderer(mesh);
+    const cityManager = new CityManager();
+    const cityUI = new CityUI(render, cityManager);
+    render.cityUI = cityUI;
 
     /* set initial parameters */
     for (let phase of ['elevation', 'biomes', 'rivers', 'render']) {
@@ -146,11 +153,18 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
     
     Painting.screenToWorldCoords = (coords) => {
         let out = render.screenToWorld(coords);
-        return [out[0] / 1000, out[1] / 1000];
+        return [out[0] / param.map.width, out[1] / param.map.height];
     };
 
     Painting.onUpdate = () => {
         generate();
+    };
+
+    /* Reset clears the city markers from the map but keeps the entries
+     * in the city panel (they become "unplaced" again). */
+    Painting.onReset = () => {
+        for (const c of cityManager.getCities()) { c.placed = false; }
+        cityUI.rebuild();
     };
 
     const worker = new window.Worker("build/_worker.js");
@@ -164,7 +178,7 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
     
     worker.addEventListener('message', event => {
         working = false;
-        let {elapsed, numRiverTriangles, quad_elements_buffer, a_quad_em_buffer, a_river_xyww_buffer} = event.data;
+        let {elapsed, numRiverTriangles, numBorderSegments, quad_elements_buffer, a_quad_em_buffer, a_river_xyww_buffer, a_border_xy_buffer} = event.data;
         elapsedTimeHistory.push(elapsed | 0);
         if (elapsedTimeHistory.length > 10) { elapsedTimeHistory.splice(0, 1); }
         const timingDiv = document.getElementById('timing');
@@ -172,7 +186,9 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
         render.quad_elements = new Int32Array(quad_elements_buffer);
         render.a_quad_em = new Float32Array(a_quad_em_buffer);
         render.a_river_xyww = new Float32Array(a_river_xyww_buffer);
+        render.a_border_xy = new Float32Array(a_border_xy_buffer);
         render.numRiverTriangles = numRiverTriangles;
+        render.numBorderSegments = numBorderSegments;
         render.updateMap();
         redraw();
         if (workRequested) {
@@ -185,29 +201,36 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
 
     function updateUI() {
         let userHasPainted = Painting.userHasPainted();
+        let terrainHasPainted = Painting.terrainHasPainted();
+        let countryHasPainted = Painting.countryHasPainted();
         (document.querySelector("#slider-seed input") as HTMLInputElement).disabled = userHasPainted;
         (document.querySelector("#slider-island input") as HTMLInputElement).disabled = userHasPainted;
-        (document.querySelector("#button-reset") as HTMLInputElement).disabled = !userHasPainted;
+        (document.querySelector("#button-reset") as HTMLInputElement).disabled = !(userHasPainted || terrainHasPainted || countryHasPainted);
     }
     
     function generate() {
         if (!working) {
             working = true;
             Painting.setElevationParam(param.elevation);
+            render.setCountryNames(Painting.countryNames);
             updateUI();
             worker.postMessage({
                 param,
                 constraints: {
-                    size: Painting.size,
+                    size: {width: Painting.width, height: Painting.height},
                     constraints: Painting.constraints,
+                    terrain: Painting.terrain,
+                    country: Painting.country,
                 },
                 quad_elements_buffer: render.quad_elements.buffer,
                 a_quad_em_buffer: render.a_quad_em.buffer,
                 a_river_xyww_buffer: render.a_river_xyww.buffer,
+                a_border_xy_buffer: render.a_border_xy.buffer,
             }, [
                 render.quad_elements.buffer,
                 render.a_quad_em.buffer,
                 render.a_river_xyww.buffer,
+                render.a_border_xy.buffer,
             ]
             );
         } else {
@@ -220,6 +243,85 @@ function main({mesh, t_peaks}: { mesh: Mesh; t_peaks: number[]; }) {
 
     const downloadButton = document.getElementById('button-download');
     if (downloadButton) downloadButton.addEventListener('click', download);
+
+    /* ---- export / import map state ---- */
+
+    function syncSliders() {
+        for (let phase of ['elevation', 'biomes', 'rivers', 'render']) {
+            for (let [name] of initialParams[phase]) {
+                const input = document.querySelector(`#slider-${name} input`) as HTMLInputElement;
+                if (input) input.value = String(param[phase][name]);
+            }
+        }
+    }
+
+    function exportState() {
+        const data = {
+            param,
+            scenes: Painting.dumpScenes(),
+            cities: cityManager.toJSON(),
+        };
+        const blob = new Blob([JSON.stringify(data)], {type: 'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.setAttribute('download', 'mapgen4-save.json');
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    function importState(file: File) {
+        file.text().then(text => {
+            const data = JSON.parse(text);
+            if (!data || !data.scenes) { throw "bad save file"; }
+            Painting.loadScenes(data.scenes);
+            if (data.param) {
+                for (let phase of ['elevation', 'biomes', 'rivers', 'render']) {
+                    Object.assign(param[phase], data.param[phase] ?? {});
+                }
+                syncSliders();
+            }
+            if (data.cities) {
+                cityManager.fromJSON(data.cities);
+                cityUI.selectedCityId = null;
+                cityUI.rebuild();
+            }
+            generate();
+        }).catch(err => {
+            console.error("import failed", err);
+            alert("导入失败：文件格式不正确");
+        });
+    }
+
+    const exportButton = document.createElement('button');
+    exportButton.setAttribute('id', 'button-export');
+    exportButton.textContent = '导出地图';
+    exportButton.addEventListener('click', exportState);
+
+    const importButton = document.createElement('button');
+    importButton.setAttribute('id', 'button-import');
+    importButton.textContent = '导入地图';
+    const fileInput = document.createElement('input');
+    fileInput.setAttribute('type', 'file');
+    fileInput.setAttribute('accept', '.json');
+    fileInput.style.display = 'none';
+    importButton.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files && fileInput.files[0]) { importState(fileInput.files[0]); }
+        fileInput.value = '';
+    });
+
+    const ioRow = document.createElement('div');
+    ioRow.setAttribute('id', 'io-row');
+    ioRow.appendChild(exportButton);
+    ioRow.appendChild(importButton);
+    ioRow.appendChild(fileInput);
+    const downloadImageButton = document.createElement('button');
+    downloadImageButton.setAttribute('id', 'button-export-image');
+    downloadImageButton.textContent = '导出图片';
+    downloadImageButton.addEventListener('click', download);
+    ioRow.appendChild(downloadImageButton);
+    document.getElementById('sliders').appendChild(ioRow);
 }
 
 makeMesh().then(main);
